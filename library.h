@@ -9,6 +9,18 @@
 #endif
 
 #ifdef __cplusplus
+
+// Template pour libérer en toute sécurité les interfaces COM
+template <class T>
+void SafeRelease(T **ppT)
+{
+    if (*ppT)
+    {
+        (*ppT)->Release();
+        *ppT = nullptr;
+    }
+}
+
 extern "C" {
 #endif
 
@@ -24,12 +36,15 @@ extern "C" {
 
 #include <windows.h>
 
+
+
     // Event types for the callback
 #define MP_EVENT_MEDIAITEM_CREATED    1
 #define MP_EVENT_MEDIAITEM_SET        2
 #define MP_EVENT_PLAYBACK_STARTED     3
 #define MP_EVENT_PLAYBACK_STOPPED     4
 #define MP_EVENT_PLAYBACK_ERROR       5
+#define MP_EVENT_PLAYBACK_PAUSED      6
 
     // Some internal error codes (example)
 #define MP_E_NOT_INITIALIZED     ((HRESULT)0x80000001L)
@@ -50,6 +65,18 @@ extern "C" {
     MEDIAPLAYER_API BOOL    IsInitialized();
     MEDIAPLAYER_API BOOL    HasVideo();
 
+    // Volume
+    MEDIAPLAYER_API HRESULT SetVolume(float level);    // niveau entre 0.0 et 1.0
+    MEDIAPLAYER_API HRESULT GetVolume(float* pLevel);
+    MEDIAPLAYER_API HRESULT SetMute(BOOL bMute);
+    MEDIAPLAYER_API HRESULT GetMute(BOOL* pbMute);
+
+    // slider
+    MEDIAPLAYER_API HRESULT GetDuration(LONGLONG* pDuration);  // Durée totale en 100ns units
+    MEDIAPLAYER_API HRESULT GetCurrentPosition(LONGLONG* pPosition); // Position actuelle
+    MEDIAPLAYER_API HRESULT SetPosition(LONGLONG position); // Définir la position
+
 #ifdef __cplusplus
+
 }
 #endif

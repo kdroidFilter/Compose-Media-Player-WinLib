@@ -1,3 +1,0 @@
-C:/Users/Elyahou Gambache/CLionProjects/simpleplayer/cmake-build-release/CMakeFiles/simpleplayer.dir
-C:/Users/Elyahou Gambache/CLionProjects/simpleplayer/cmake-build-release/CMakeFiles/edit_cache.dir
-C:/Users/Elyahou Gambache/CLionProjects/simpleplayer/cmake-build-release/CMakeFiles/rebuild_cache.dir

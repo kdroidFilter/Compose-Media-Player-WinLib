@@ -1,8 +1,0 @@
-# ninja log v6
-4	224	7591863039551752	CMakeFiles/simpleplayer.dir/library.cpp.obj.ddi	f48115dc35de20ad
-232	268	7591863042235705	CMakeFiles/simpleplayer.dir/CXX.dd	62eb7beca8ec1b5c
-232	268	7591863042235705	CMakeFiles/simpleplayer.dir/library.cpp.obj.modmap	62eb7beca8ec1b5c
-275	762	7591863042348205	CMakeFiles/simpleplayer.dir/library.cpp.obj	134ba0ff25f5497
-762	877	7591863047221187	simpleplayer.dll	495c3370abd8861a
-762	877	7591863047221187	simpleplayer.lib	495c3370abd8861a
-232	268	7591863042235705	C:/Users/Elyahou Gambache/CLionProjects/simpleplayer/cmake-build-release/CMakeFiles/simpleplayer.dir/CXXModules.json	62eb7beca8ec1b5c

@@ -1,5 +1,4 @@
 #define WINVER _WIN32_WINNT_WIN10
-#define MEDIAPLAYER_EXPORTS
 
 #include "library.h"
 #include <windows.h>
@@ -10,6 +9,8 @@
 #include <objbase.h>
 #include <new>
 #include <atomic>
+#include <Audiopolicy.h>
+#include <Mmdeviceapi.h>
 
 // =============== Structures and Global Variables ====================
 
@@ -21,7 +22,10 @@ struct PlayerState {
     std::atomic<bool>     isInitialized;
     std::atomic<bool>     isPlaying;
     CRITICAL_SECTION      lock;
+    ISimpleAudioVolume* audioVolume;  // Pour le contrôle du volume
+    IAudioSessionControl* audioSession;  // Pour le contrôle de session audio
 };
+
 
 // Our global state
 static PlayerState g_state = {
@@ -32,6 +36,7 @@ static PlayerState g_state = {
     false,      // isInitialized
     false       // isPlaying
 };
+
 
 // Playback thread + message loop
 static HANDLE g_hThread       = nullptr;
@@ -57,6 +62,228 @@ static void LogDebugW(const wchar_t* format, ...)
     (void)format; // no log in release mode
 #endif
 }
+
+
+// =============== Audio Control ======================
+HRESULT InitializeAudioControl()
+{
+    HRESULT hr = S_OK;
+
+    EnterCriticalSection(&g_state.lock);
+
+    if (!g_state.isInitialized || !g_state.player) {
+        LeaveCriticalSection(&g_state.lock);
+        return MP_E_NOT_INITIALIZED;
+    }
+
+    // Si déjà initialisé, on sort
+    if (g_state.audioVolume) {
+        LeaveCriticalSection(&g_state.lock);
+        return S_OK;
+    }
+
+    IMMDeviceEnumerator* pDeviceEnumerator = nullptr;
+    IMMDevice* pDevice = nullptr;
+    IAudioSessionManager* pSessionManager = nullptr;
+
+    // Créer l'énumérateur de périphériques audio
+    hr = CoCreateInstance(
+        __uuidof(MMDeviceEnumerator),
+        nullptr,
+        CLSCTX_INPROC_SERVER,
+        IID_PPV_ARGS(&pDeviceEnumerator)
+    );
+    if (FAILED(hr)) goto cleanup;
+
+    // Obtenir le périphérique audio par défaut
+    hr = pDeviceEnumerator->GetDefaultAudioEndpoint(
+        eRender,
+        eConsole,
+        &pDevice
+    );
+    if (FAILED(hr)) goto cleanup;
+
+    // Obtenir le gestionnaire de session
+    hr = pDevice->Activate(
+        __uuidof(IAudioSessionManager),
+        CLSCTX_INPROC_SERVER,
+        nullptr,
+        (void**)&pSessionManager
+    );
+    if (FAILED(hr)) goto cleanup;
+
+    // Obtenir le contrôle de session audio
+    hr = pSessionManager->GetAudioSessionControl(
+        &GUID_NULL,
+        FALSE,
+        &g_state.audioSession
+    );
+    if (FAILED(hr)) goto cleanup;
+
+    // Obtenir le contrôle de volume simple
+    hr = pSessionManager->GetSimpleAudioVolume(
+        &GUID_NULL,
+        FALSE,
+        &g_state.audioVolume
+    );
+
+    cleanup:
+        SafeRelease(&pSessionManager);
+    SafeRelease(&pDevice);
+    SafeRelease(&pDeviceEnumerator);
+
+    LeaveCriticalSection(&g_state.lock);
+    return hr;
+}
+
+HRESULT SetVolume(float level)
+{
+    if (level < 0.0f || level > 1.0f) {
+        return MP_E_INVALID_PARAMETER;
+    }
+
+    HRESULT hr = InitializeAudioControl();
+    if (FAILED(hr)) return hr;
+
+    EnterCriticalSection(&g_state.lock);
+    if (g_state.audioVolume) {
+        hr = g_state.audioVolume->SetMasterVolume(level, nullptr);
+    }
+    LeaveCriticalSection(&g_state.lock);
+
+    return hr;
+}
+
+HRESULT GetVolume(float* pLevel)
+{
+    if (!pLevel) return MP_E_INVALID_PARAMETER;
+
+    HRESULT hr = InitializeAudioControl();
+    if (FAILED(hr)) return hr;
+
+    EnterCriticalSection(&g_state.lock);
+    if (g_state.audioVolume) {
+        hr = g_state.audioVolume->GetMasterVolume(pLevel);
+    }
+    LeaveCriticalSection(&g_state.lock);
+
+    return hr;
+}
+
+HRESULT SetMute(BOOL bMute)
+{
+    HRESULT hr = InitializeAudioControl();
+    if (FAILED(hr)) return hr;
+
+    EnterCriticalSection(&g_state.lock);
+    if (g_state.audioVolume) {
+        hr = g_state.audioVolume->SetMute(bMute, nullptr);
+    }
+    LeaveCriticalSection(&g_state.lock);
+
+    return hr;
+}
+
+HRESULT GetMute(BOOL* pbMute)
+{
+    if (!pbMute) return MP_E_INVALID_PARAMETER;
+
+    HRESULT hr = InitializeAudioControl();
+    if (FAILED(hr)) return hr;
+
+    EnterCriticalSection(&g_state.lock);
+    if (g_state.audioVolume) {
+        hr = g_state.audioVolume->GetMute(pbMute);
+    }
+    LeaveCriticalSection(&g_state.lock);
+
+    return hr;
+}
+
+// =============== Slider ======================
+
+
+HRESULT GetDuration(LONGLONG* pDuration)
+{
+    if (!pDuration) return MP_E_INVALID_PARAMETER;
+
+    EnterCriticalSection(&g_state.lock);
+    if (!g_state.isInitialized || !g_state.player) {
+        LeaveCriticalSection(&g_state.lock);
+        return MP_E_NOT_INITIALIZED;
+    }
+
+    PROPVARIANT var;
+    PropVariantInit(&var);
+
+    // Get duration in 100ns units
+    HRESULT hr = g_state.player->GetDuration(
+        MFP_POSITIONTYPE_100NS,
+        &var
+    );
+
+    if (SUCCEEDED(hr)) {
+        *pDuration = var.hVal.QuadPart;
+    }
+
+    PropVariantClear(&var);
+    LeaveCriticalSection(&g_state.lock);
+    return hr;
+}
+
+HRESULT GetCurrentPosition(LONGLONG* pPosition)
+{
+    if (!pPosition) return MP_E_INVALID_PARAMETER;
+
+    EnterCriticalSection(&g_state.lock);
+    if (!g_state.isInitialized || !g_state.player) {
+        LeaveCriticalSection(&g_state.lock);
+        return MP_E_NOT_INITIALIZED;
+    }
+
+    PROPVARIANT var;
+    PropVariantInit(&var);
+
+    // Get current position in 100ns units
+    HRESULT hr = g_state.player->GetPosition(
+        MFP_POSITIONTYPE_100NS,
+        &var
+    );
+
+    if (SUCCEEDED(hr)) {
+        *pPosition = var.hVal.QuadPart;
+    }
+
+    PropVariantClear(&var);
+    LeaveCriticalSection(&g_state.lock);
+    return hr;
+}
+
+HRESULT SetPosition(LONGLONG position)
+{
+    EnterCriticalSection(&g_state.lock);
+    if (!g_state.isInitialized || !g_state.player) {
+        LeaveCriticalSection(&g_state.lock);
+        return MP_E_NOT_INITIALIZED;
+    }
+
+    PROPVARIANT var;
+    PropVariantInit(&var);
+
+    // Set the position in 100ns units
+    var.vt = VT_I8;
+    var.hVal.QuadPart = position;
+
+    HRESULT hr = g_state.player->SetPosition(
+        MFP_POSITIONTYPE_100NS,
+        &var
+    );
+
+    PropVariantClear(&var);
+    LeaveCriticalSection(&g_state.lock);
+    return hr;
+}
+
 
 // =============== MFPlay Callback Class ======================
 class MediaPlayerCallback : public IMFPMediaPlayerCallback {
@@ -134,15 +361,20 @@ public:
             }
             break;
         }
-        case MFP_EVENT_TYPE_PLAY:
-            LogDebugW(L"[Callback] MFP_EVENT_TYPE_PLAY -> PLAYBACK_STARTED\n");
+            case MFP_EVENT_TYPE_PLAY:
+                LogDebugW(L"[Callback] MFP_EVENT_TYPE_PLAY -> PLAYBACK_STARTED\n");
             g_state.isPlaying = true;
             g_state.userCallback(MP_EVENT_PLAYBACK_STARTED, pEventHeader->hrEvent);
             break;
 
-        case MFP_EVENT_TYPE_PAUSE:
-        case MFP_EVENT_TYPE_STOP:
-            LogDebugW(L"[Callback] MFP_EVENT_TYPE_STOP -> PLAYBACK_STOPPED\n");
+            case MFP_EVENT_TYPE_PAUSE:  // Handle PAUSE separately from STOP
+                LogDebugW(L"[Callback] MFP_EVENT_TYPE_PAUSE -> PLAYBACK_PAUSED\n");
+            g_state.isPlaying = false;
+            g_state.userCallback(MP_EVENT_PLAYBACK_PAUSED, pEventHeader->hrEvent); // Add new event type
+            break;
+
+            case MFP_EVENT_TYPE_STOP:
+                LogDebugW(L"[Callback] MFP_EVENT_TYPE_STOP -> PLAYBACK_STOPPED\n");
             g_state.isPlaying = false;
             g_state.userCallback(MP_EVENT_PLAYBACK_STOPPED, pEventHeader->hrEvent);
             break;
@@ -412,6 +644,14 @@ void CleanupMediaPlayer()
     g_state.hasVideo      = false;
     g_state.userCallback  = nullptr;
     g_state.hwnd          = nullptr;
+    if (g_state.audioVolume) {
+        g_state.audioVolume->Release();
+        g_state.audioVolume = nullptr;
+    }
+    if (g_state.audioSession) {
+        g_state.audioSession->Release();
+        g_state.audioSession = nullptr;
+    }
     LeaveCriticalSection(&g_state.lock);
 }
 
@@ -426,6 +666,7 @@ BOOL HasVideo()
 {
     return g_state.hasVideo;
 }
+
 
 // ============================
 // Static Initialization Block

@@ -1,4 +1,0 @@
-"C:\Users\Elyahou Gambache\AppData\Local\Programs\CLion\bin\cmake\win\x64\bin\cmake.exe" -DCMAKE_BUILD_TYPE=Release "-DCMAKE_MAKE_PROGRAM=C:/Users/Elyahou Gambache/AppData/Local/Programs/CLion/bin/ninja/win/x64/ninja.exe" -G Ninja -S "C:\Users\Elyahou Gambache\CLionProjects\simpleplayer" -B "C:\Users\Elyahou Gambache\CLionProjects\simpleplayer\cmake-build-release"
--- Configuring done (0.0s)
--- Generating done (0.0s)
--- Build files have been written to: C:/Users/Elyahou Gambache/CLionProjects/simpleplayer/cmake-build-release
