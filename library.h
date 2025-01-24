@@ -21,6 +21,13 @@ void SafeRelease(T **ppT)
     }
 }
 
+// Structure pour les dimensions de la vidéo
+struct VideoSize {
+    int width;    // Largeur
+    int height;   // Hauteur
+    float ratio;  // Aspect ratio (width/height)
+};
+
 extern "C" {
 #endif
 
@@ -84,6 +91,12 @@ MEDIAPLAYER_API HRESULT GetMute(BOOL* pbMute);
 MEDIAPLAYER_API HRESULT GetDuration(LONGLONG* pDuration);  // Durée totale en 100ns units
 MEDIAPLAYER_API HRESULT GetCurrentPosition(LONGLONG* pPosition); // Position actuelle
 MEDIAPLAYER_API HRESULT SetPosition(LONGLONG position); // Définir la position
+
+    // Fonction pour obtenir les dimensions complètes de la vidéo
+    MEDIAPLAYER_API HRESULT GetVideoSize(VideoSize* pSize);
+
+    // Fonction simplifiée pour obtenir uniquement l'aspect ratio
+    MEDIAPLAYER_API HRESULT GetVideoAspectRatio(float* pRatio);
 
 #ifdef __cplusplus
 }

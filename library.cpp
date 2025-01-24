@@ -438,6 +438,65 @@ BOOL IsPlaying()
     return isPlaying;
 }
 
+// =============== ASPECT RATIO UTILS ======================
+
+HRESULT GetVideoSize(VideoSize* pSize)
+{
+    if (!pSize) {
+        return MP_E_INVALID_PARAMETER;
+    }
+
+    // Initialiser les valeurs par défaut
+    pSize->width = 0;
+    pSize->height = 0;
+    pSize->ratio = 0.0f;
+
+    EnterCriticalSection(&g_state.lock);
+
+    if (!g_state.isInitialized || !g_state.player) {
+        LeaveCriticalSection(&g_state.lock);
+        return MP_E_NOT_INITIALIZED;
+    }
+
+    SIZE videoSize = {0};      // Taille native de la vidéo
+    SIZE arSize = {0};         // Taille avec l'aspect ratio appliqué
+
+    HRESULT hr = g_state.player->GetNativeVideoSize(&videoSize, &arSize);
+
+    if (SUCCEEDED(hr)) {
+        pSize->width = arSize.cx;
+        pSize->height = arSize.cy;
+
+        // Calculer l'aspect ratio
+        if (arSize.cy > 0) {
+            pSize->ratio = static_cast<float>(arSize.cx) / static_cast<float>(arSize.cy);
+        }
+
+        LogDebugW(L"[GetVideoSize] Video size: %dx%d, Aspect Ratio: %.3f\n",
+                  pSize->width, pSize->height, pSize->ratio);
+    } else {
+        LogDebugW(L"[GetVideoSize] Failed to get video size: 0x%08x\n", hr);
+    }
+
+    LeaveCriticalSection(&g_state.lock);
+    return hr;
+}
+
+// Fonction utilitaire pour obtenir seulement l'aspect ratio
+HRESULT GetVideoAspectRatio(float* pRatio)
+{
+    if (!pRatio) {
+        return MP_E_INVALID_PARAMETER;
+    }
+
+    VideoSize size;
+    HRESULT hr = GetVideoSize(&size);
+    if (SUCCEEDED(hr)) {
+        *pRatio = size.ratio;
+    }
+    return hr;
+}
+
 // =============== MFPlay Callback Class ======================
 class MediaPlayerCallback : public IMFPMediaPlayerCallback {
 private:
