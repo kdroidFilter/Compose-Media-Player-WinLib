@@ -1,0 +1,1 @@
+Native Windows lib for compose media player
