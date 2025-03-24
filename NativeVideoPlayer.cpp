@@ -1,6 +1,6 @@
 #define WINVER _WIN32_WINNT_WIN10
 
-#include "library.h"
+#include "NativeVideoPlayer.h"
 #include <windows.h>
 #include <mfplay.h>
 #include <mferror.h>
@@ -16,46 +16,42 @@
 
 // =============== Structures and Global Variables ====================
 
+// Structure to hold the player state
 struct PlayerState {
-    IMFPMediaPlayer*      player;
-    MEDIA_PLAYER_CALLBACK userCallback;
-    HWND                  hwnd;
-    std::atomic<bool>     hasVideo;
-    std::atomic<bool>     isInitialized;
-    std::atomic<bool>     isPlaying;
-    std::atomic<bool>     isLoading;
-    CRITICAL_SECTION      lock;
-    ISimpleAudioVolume* audioVolume;  // Pour le contrôle du volume
-    IAudioSessionControl* audioSession;  // Pour le contrôle de session audio
-    IAudioMeterInformation* audioMeter;   // <-- Nouvel ajout pour récupérer le niveau par canal
-
+    IMFPMediaPlayer *player; // MFPlay media player
+    MEDIA_PLAYER_CALLBACK userCallback; // Callback provided by user
+    HWND hwnd; // Window handle for video display
+    std::atomic<bool> hasVideo; // Indicates if media contains video
+    std::atomic<bool> isInitialized; // Indicates if player is initialized
+    std::atomic<bool> isPlaying; // Indicates if playback is ongoing
+    std::atomic<bool> isLoading; // Indicates if media is loading
+    CRITICAL_SECTION lock; // Thread-synchronization
+    ISimpleAudioVolume *audioVolume; // For volume control
+    IAudioSessionControl *audioSession; // For audio session control
+    IAudioMeterInformation *audioMeter; // For retrieving per-channel audio levels
 };
 
-
-// Our global state
+// Global player state
 static PlayerState g_state = {
-    nullptr,    // player
-    nullptr,    // userCallback
-    nullptr,    // hwnd
-    false,      // hasVideo
-    false,      // isInitialized
-    false       // isPlaying
+    nullptr, // player
+    nullptr, // userCallback
+    nullptr, // hwnd
+    false, // hasVideo
+    false, // isInitialized
+    false // isPlaying
 };
 
+// Playback thread variables + message loop
+static HANDLE g_hThread = nullptr;
+static DWORD g_dwThreadId = 0;
+static bool g_bThreadActive = false; // Indicates if thread is running
 
-// Playback thread + message loop
-static HANDLE g_hThread       = nullptr;
-static DWORD  g_dwThreadId    = 0;
-static bool   g_bThreadActive = false;  // To check if it's running
+// Variables to store initialization parameters for the thread
+static HWND g_hwndInit = nullptr;
+static MEDIA_PLAYER_CALLBACK g_cbInit = nullptr;
 
-// To simplify, we'll store everything the thread needs
-// before starting it.
-static HWND                  g_hwndInit = nullptr;
-static MEDIA_PLAYER_CALLBACK g_cbInit   = nullptr;
-
-// =============== Utility Logging (debug) ====================
-static void LogDebugW(const wchar_t* format, ...)
-{
+// =============== Debug Logging Utility ====================
+static void LogDebugW(const wchar_t *format, ...) {
 #ifdef _DEBUG
     wchar_t buffer[1024];
     va_list args;
@@ -64,14 +60,13 @@ static void LogDebugW(const wchar_t* format, ...)
     va_end(args);
     OutputDebugStringW(buffer);
 #else
-    (void)format; // no log in release mode
+    (void) format; // No logging in release mode
 #endif
 }
 
+// =============== Audio Control Functions ======================
 
-// =============== Audio Control ======================
-HRESULT InitializeAudioControl()
-{
+HRESULT InitializeAudioControl() {
     HRESULT hr = S_OK;
 
     EnterCriticalSection(&g_state.lock);
@@ -81,17 +76,17 @@ HRESULT InitializeAudioControl()
         return MP_E_NOT_INITIALIZED;
     }
 
-    // Si déjà initialisé, on sort
+    // If already initialized, return immediately
     if (g_state.audioVolume) {
         LeaveCriticalSection(&g_state.lock);
         return S_OK;
     }
 
-    IMMDeviceEnumerator* pDeviceEnumerator = nullptr;
-    IMMDevice* pDevice = nullptr;
-    IAudioSessionManager* pSessionManager = nullptr;
+    IMMDeviceEnumerator *pDeviceEnumerator = nullptr;
+    IMMDevice *pDevice = nullptr;
+    IAudioSessionManager *pSessionManager = nullptr;
 
-    // Créer l'énumérateur de périphériques audio
+    // Create the audio device enumerator
     hr = CoCreateInstance(
         __uuidof(MMDeviceEnumerator),
         nullptr,
@@ -100,7 +95,7 @@ HRESULT InitializeAudioControl()
     );
     if (FAILED(hr)) goto cleanup;
 
-    // Obtenir le périphérique audio par défaut
+    // Get the default audio endpoint
     hr = pDeviceEnumerator->GetDefaultAudioEndpoint(
         eRender,
         eConsole,
@@ -108,16 +103,16 @@ HRESULT InitializeAudioControl()
     );
     if (FAILED(hr)) goto cleanup;
 
-    // Obtenir le gestionnaire de session
+    // Activate the audio session manager
     hr = pDevice->Activate(
         __uuidof(IAudioSessionManager),
         CLSCTX_INPROC_SERVER,
         nullptr,
-        (void**)&pSessionManager
+        reinterpret_cast<void **>(&pSessionManager)
     );
     if (FAILED(hr)) goto cleanup;
 
-    // Obtenir le contrôle de session audio
+    // Get the audio session control interface
     hr = pSessionManager->GetAudioSessionControl(
         &GUID_NULL,
         FALSE,
@@ -125,15 +120,15 @@ HRESULT InitializeAudioControl()
     );
     if (FAILED(hr)) goto cleanup;
 
-    // Obtenir le contrôle de volume simple
+    // Get the simple audio volume control interface
     hr = pSessionManager->GetSimpleAudioVolume(
         &GUID_NULL,
         FALSE,
         &g_state.audioVolume
     );
 
-    cleanup:
-        SafeRelease(&pSessionManager);
+cleanup:
+    SafeRelease(&pSessionManager);
     SafeRelease(&pDevice);
     SafeRelease(&pDeviceEnumerator);
 
@@ -141,8 +136,7 @@ HRESULT InitializeAudioControl()
     return hr;
 }
 
-HRESULT SetVolume(float level)
-{
+HRESULT SetVolume(float level) {
     if (level < 0.0f || level > 1.0f) {
         return MP_E_INVALID_PARAMETER;
     }
@@ -159,8 +153,7 @@ HRESULT SetVolume(float level)
     return hr;
 }
 
-HRESULT GetVolume(float* pLevel)
-{
+HRESULT GetVolume(float *pLevel) {
     if (!pLevel) return MP_E_INVALID_PARAMETER;
 
     HRESULT hr = InitializeAudioControl();
@@ -175,8 +168,7 @@ HRESULT GetVolume(float* pLevel)
     return hr;
 }
 
-HRESULT SetMute(BOOL bMute)
-{
+HRESULT SetMute(BOOL bMute) {
     HRESULT hr = InitializeAudioControl();
     if (FAILED(hr)) return hr;
 
@@ -189,8 +181,7 @@ HRESULT SetMute(BOOL bMute)
     return hr;
 }
 
-HRESULT GetMute(BOOL* pbMute)
-{
+HRESULT GetMute(BOOL *pbMute) {
     if (!pbMute) return MP_E_INVALID_PARAMETER;
 
     HRESULT hr = InitializeAudioControl();
@@ -205,11 +196,9 @@ HRESULT GetMute(BOOL* pbMute)
     return hr;
 }
 
-// =============== Slider ======================
+// =============== Slider Functions ======================
 
-
-HRESULT GetDuration(LONGLONG* pDuration)
-{
+HRESULT GetDuration(LONGLONG *pDuration) {
     if (!pDuration) return MP_E_INVALID_PARAMETER;
 
     EnterCriticalSection(&g_state.lock);
@@ -236,8 +225,7 @@ HRESULT GetDuration(LONGLONG* pDuration)
     return hr;
 }
 
-HRESULT GetCurrentPosition(LONGLONG* pPosition)
-{
+HRESULT GetCurrentPosition(LONGLONG *pPosition) {
     if (!pPosition) return MP_E_INVALID_PARAMETER;
 
     EnterCriticalSection(&g_state.lock);
@@ -264,8 +252,7 @@ HRESULT GetCurrentPosition(LONGLONG* pPosition)
     return hr;
 }
 
-HRESULT SetPosition(LONGLONG position)
-{
+HRESULT SetPosition(LONGLONG position) {
     EnterCriticalSection(&g_state.lock);
     if (!g_state.isInitialized || !g_state.player) {
         LeaveCriticalSection(&g_state.lock);
@@ -289,10 +276,9 @@ HRESULT SetPosition(LONGLONG position)
     return hr;
 }
 
-// =============== Audio Level ======================
+// =============== Audio Level Functions ======================
 
-HRESULT InitializeAudioMetering()
-{
+HRESULT InitializeAudioMetering() {
     HRESULT hr = S_OK;
     EnterCriticalSection(&g_state.lock);
 
@@ -301,18 +287,18 @@ HRESULT InitializeAudioMetering()
         return MP_E_NOT_INITIALIZED;
     }
 
-    // Si déjà initialisé, retourner
+    // If already initialized, return immediately
     if (g_state.audioMeter) {
         LeaveCriticalSection(&g_state.lock);
         return S_OK;
     }
 
-    IMMDeviceEnumerator* pDeviceEnumerator = nullptr;
-    IMMDevice* pDevice = nullptr;
-    IAudioSessionManager2* pSessionManager = nullptr;
-    IAudioMeterInformation* pMeter = nullptr;
+    IMMDeviceEnumerator *pDeviceEnumerator = nullptr;
+    IMMDevice *pDevice = nullptr;
+    IAudioSessionManager2 *pSessionManager = nullptr;
+    IAudioMeterInformation *pMeter = nullptr;
 
-    // Créer l'énumérateur
+    // Create the device enumerator
     hr = CoCreateInstance(
         __uuidof(MMDeviceEnumerator),
         nullptr,
@@ -324,10 +310,10 @@ HRESULT InitializeAudioMetering()
         goto cleanup;
     }
 
-    // Obtenir le périphérique de rendu par défaut
+    // Get the default rendering audio endpoint (changed from eConsole to eMultimedia)
     hr = pDeviceEnumerator->GetDefaultAudioEndpoint(
         eRender,
-        eMultimedia,  // Changé de eConsole à eMultimedia
+        eMultimedia,
         &pDevice
     );
     if (FAILED(hr)) {
@@ -335,26 +321,26 @@ HRESULT InitializeAudioMetering()
         goto cleanup;
     }
 
-    // Obtenir le IAudioMeterInformation directement du périphérique
+    // Activate IAudioMeterInformation directly from the device
     hr = pDevice->Activate(
         __uuidof(IAudioMeterInformation),
         CLSCTX_ALL,
         nullptr,
-        reinterpret_cast<void**>(&pMeter)
+        reinterpret_cast<void **>(&pMeter)
     );
     if (FAILED(hr)) {
         LogDebugW(L"Failed to activate IAudioMeterInformation: 0x%08x\n", hr);
         goto cleanup;
     }
 
-    // Stocker l'interface dans l'état global
+    // Store the interface in the global state and transfer ownership
     g_state.audioMeter = pMeter;
-    pMeter = nullptr; // Transfert de propriété
+    pMeter = nullptr;
 
     LogDebugW(L"Audio metering initialized successfully\n");
 
-    cleanup:
-        SafeRelease(&pMeter);
+cleanup:
+    SafeRelease(&pMeter);
     SafeRelease(&pSessionManager);
     SafeRelease(&pDevice);
     SafeRelease(&pDeviceEnumerator);
@@ -363,13 +349,12 @@ HRESULT InitializeAudioMetering()
     return hr;
 }
 
-HRESULT GetChannelLevels(float* pLeft, float* pRight)
-{
+HRESULT GetChannelLevels(float *pLeft, float *pRight) {
     if (!pLeft || !pRight) {
         return E_INVALIDARG;
     }
 
-    // Initialiser les valeurs par défaut
+    // Initialize default values
     *pLeft = 0.0f;
     *pRight = 0.0f;
 
@@ -409,8 +394,7 @@ HRESULT GetChannelLevels(float* pLeft, float* pRight)
         *pLeft = peaks[0];
         *pRight = peaks[1];
         LogDebugW(L"Peak values - Left: %.3f, Right: %.3f\n", *pLeft, *pRight);
-    }
-    else if (channelCount == 1) {
+    } else if (channelCount == 1) {
         *pLeft = *pRight = peaks[0];
         LogDebugW(L"Mono peak value: %.3f\n", *pLeft);
     }
@@ -419,34 +403,30 @@ HRESULT GetChannelLevels(float* pLeft, float* pRight)
     return S_OK;
 }
 
-// =============== Player State ======================
+// =============== Player State Functions ======================
 
-
-BOOL IsLoading()
-{
+BOOL IsLoading() {
     EnterCriticalSection(&g_state.lock);
     BOOL isLoading = g_state.isLoading;
     LeaveCriticalSection(&g_state.lock);
     return isLoading;
 }
 
-BOOL IsPlaying()
-{
+BOOL IsPlaying() {
     EnterCriticalSection(&g_state.lock);
     BOOL isPlaying = g_state.isPlaying;
     LeaveCriticalSection(&g_state.lock);
     return isPlaying;
 }
 
-// =============== ASPECT RATIO UTILS ======================
+// =============== Aspect Ratio Utilities ======================
 
-HRESULT GetVideoSize(VideoSize* pSize)
-{
+HRESULT GetVideoSize(VideoSize *pSize) {
     if (!pSize) {
         return MP_E_INVALID_PARAMETER;
     }
 
-    // Initialiser les valeurs par défaut
+    // Initialize default values
     pSize->width = 0;
     pSize->height = 0;
     pSize->ratio = 0.0f;
@@ -458,8 +438,8 @@ HRESULT GetVideoSize(VideoSize* pSize)
         return MP_E_NOT_INITIALIZED;
     }
 
-    SIZE videoSize = {0};      // Taille native de la vidéo
-    SIZE arSize = {0};         // Taille avec l'aspect ratio appliqué
+    SIZE videoSize = {0}; // Native video size
+    SIZE arSize = {0}; // Size after applying aspect ratio
 
     HRESULT hr = g_state.player->GetNativeVideoSize(&videoSize, &arSize);
 
@@ -467,7 +447,7 @@ HRESULT GetVideoSize(VideoSize* pSize)
         pSize->width = arSize.cx;
         pSize->height = arSize.cy;
 
-        // Calculer l'aspect ratio
+        // Calculate aspect ratio
         if (arSize.cy > 0) {
             pSize->ratio = static_cast<float>(arSize.cx) / static_cast<float>(arSize.cy);
         }
@@ -482,14 +462,13 @@ HRESULT GetVideoSize(VideoSize* pSize)
     return hr;
 }
 
-// Fonction utilitaire pour obtenir seulement l'aspect ratio
-HRESULT GetVideoAspectRatio(float* pRatio)
-{
+// Utility function to get only the aspect ratio
+HRESULT GetVideoAspectRatio(float *pRatio) {
     if (!pRatio) {
         return MP_E_INVALID_PARAMETER;
     }
 
-    VideoSize size;
+    VideoSize size{};
     HRESULT hr = GetVideoSize(&size);
     if (SUCCEEDED(hr)) {
         *pRatio = size.ratio;
@@ -498,152 +477,152 @@ HRESULT GetVideoAspectRatio(float* pRatio)
 }
 
 // =============== MFPlay Callback Class ======================
+
 class MediaPlayerCallback : public IMFPMediaPlayerCallback {
-private:
     long m_cRef;
 
 public:
-    MediaPlayerCallback() : m_cRef(1) {}
+    virtual ~MediaPlayerCallback() = default;
 
-    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
+    MediaPlayerCallback() : m_cRef(1) {
+    }
+
+    STDMETHODIMP QueryInterface(REFIID riid, void **ppv) override {
         if (!ppv) return E_POINTER;
         if (riid == IID_IMFPMediaPlayerCallback || riid == IID_IUnknown) {
-            *ppv = static_cast<IMFPMediaPlayerCallback*>(this);
+            *ppv = static_cast<IMFPMediaPlayerCallback *>(this);
             AddRef();
             return S_OK;
         }
         *ppv = nullptr;
         return E_NOINTERFACE;
     }
+
     STDMETHODIMP_(ULONG) AddRef() override {
         return InterlockedIncrement(&m_cRef);
     }
+
     STDMETHODIMP_(ULONG) Release() override {
         ULONG count = InterlockedDecrement(&m_cRef);
         if (count == 0) delete this;
         return count;
     }
 
-void STDMETHODCALLTYPE OnMediaPlayerEvent(MFP_EVENT_HEADER* pEventHeader) override {
-    if (!pEventHeader) return;
+    void STDMETHODCALLTYPE OnMediaPlayerEvent(MFP_EVENT_HEADER *pEventHeader) override {
+        if (!pEventHeader) return;
 
-    EnterCriticalSection(&g_state.lock);
+        EnterCriticalSection(&g_state.lock);
 
-    if (!g_state.userCallback) {
-        LeaveCriticalSection(&g_state.lock);
-        return;
-    }
+        if (!g_state.userCallback) {
+            LeaveCriticalSection(&g_state.lock);
+            return;
+        }
 
-    if (FAILED(pEventHeader->hrEvent)) {
-        // Notify an error occurred
-        g_state.isPlaying = false;
-        g_state.isLoading = false;
-        g_state.userCallback(MP_EVENT_PLAYBACK_ERROR, pEventHeader->hrEvent);
-        LeaveCriticalSection(&g_state.lock);
-        return;
-    }
+        if (FAILED(pEventHeader->hrEvent)) {
+            // Notify that an error occurred
+            g_state.isPlaying = false;
+            g_state.isLoading = false;
+            g_state.userCallback(MP_EVENT_PLAYBACK_ERROR, pEventHeader->hrEvent);
+            LeaveCriticalSection(&g_state.lock);
+            return;
+        }
 
-    switch (pEventHeader->eEventType) {
-    case MFP_EVENT_TYPE_MEDIAITEM_CREATED:
-    {
-        auto pEvent = MFP_GET_MEDIAITEM_CREATED_EVENT(pEventHeader);
-        LogDebugW(L"[Callback] MFP_EVENT_TYPE_MEDIAITEM_CREATED\n");
+        switch (pEventHeader->eEventType) {
+            case MFP_EVENT_TYPE_MEDIAITEM_CREATED: {
+                auto pEvent = MFP_GET_MEDIAITEM_CREATED_EVENT(pEventHeader);
+                LogDebugW(L"[Callback] MFP_EVENT_TYPE_MEDIAITEM_CREATED\n");
 
-        if (SUCCEEDED(pEventHeader->hrEvent) && pEvent && pEvent->pMediaItem) {
-            BOOL bHasVideo = FALSE, bIsSelected = FALSE;
-            HRESULT hr = pEvent->pMediaItem->HasVideo(&bHasVideo, &bIsSelected);
-            if (SUCCEEDED(hr)) {
-                g_state.hasVideo = (bHasVideo && bIsSelected);
+                if (SUCCEEDED(pEventHeader->hrEvent) && pEvent && pEvent->pMediaItem) {
+                    BOOL bHasVideo = FALSE, bIsSelected = FALSE;
+                    HRESULT hr = pEvent->pMediaItem->HasVideo(&bHasVideo, &bIsSelected);
+                    if (SUCCEEDED(hr)) {
+                        g_state.hasVideo = (bHasVideo && bIsSelected);
+                        if (g_state.player) {
+                            g_state.player->SetMediaItem(pEvent->pMediaItem);
+                        }
+                    }
+                }
+                g_state.userCallback(MP_EVENT_MEDIAITEM_CREATED, pEventHeader->hrEvent);
+                break;
+            }
+            case MFP_EVENT_TYPE_MEDIAITEM_SET: {
+                LogDebugW(L"[Callback] MFP_EVENT_TYPE_MEDIAITEM_SET\n");
+                g_state.isLoading = false;
+                g_state.userCallback(MP_EVENT_MEDIAITEM_SET, pEventHeader->hrEvent);
+
+                // Start playback immediately
                 if (g_state.player) {
-                    g_state.player->SetMediaItem(pEvent->pMediaItem);
+                    g_state.player->Play();
+                    g_state.isPlaying = true;
                 }
+                break;
             }
-        }
-        g_state.userCallback(MP_EVENT_MEDIAITEM_CREATED, pEventHeader->hrEvent);
-        break;
-    }
-    case MFP_EVENT_TYPE_MEDIAITEM_SET:
-    {
-        LogDebugW(L"[Callback] MFP_EVENT_TYPE_MEDIAITEM_SET\n");
-        g_state.isLoading = false;
-        g_state.userCallback(MP_EVENT_MEDIAITEM_SET, pEventHeader->hrEvent);
+            case MFP_EVENT_TYPE_PLAY:
+                LogDebugW(L"[Callback] MFP_EVENT_TYPE_PLAY -> PLAYBACK_STARTED\n");
+                g_state.isPlaying = true;
+                g_state.userCallback(MP_EVENT_PLAYBACK_STARTED, pEventHeader->hrEvent);
+                break;
 
-        // Start playback immediately
-        if (g_state.player) {
-            g_state.player->Play();
-            g_state.isPlaying = true;
-        }
-        break;
-    }
-    case MFP_EVENT_TYPE_PLAY:
-        LogDebugW(L"[Callback] MFP_EVENT_TYPE_PLAY -> PLAYBACK_STARTED\n");
-        g_state.isPlaying = true;
-        g_state.userCallback(MP_EVENT_PLAYBACK_STARTED, pEventHeader->hrEvent);
-        break;
+            case MFP_EVENT_TYPE_PAUSE:
+                LogDebugW(L"[Callback] MFP_EVENT_TYPE_PAUSE -> PLAYBACK_PAUSED\n");
+                g_state.isPlaying = false;
+                g_state.userCallback(MP_EVENT_PLAYBACK_PAUSED, pEventHeader->hrEvent);
+                break;
 
-    case MFP_EVENT_TYPE_PAUSE:
-        LogDebugW(L"[Callback] MFP_EVENT_TYPE_PAUSE -> PLAYBACK_PAUSED\n");
-        g_state.isPlaying = false;
-        g_state.userCallback(MP_EVENT_PLAYBACK_PAUSED, pEventHeader->hrEvent);
-        break;
+            case MFP_EVENT_TYPE_STOP:
+                LogDebugW(L"[Callback] MFP_EVENT_TYPE_STOP -> PLAYBACK_STOPPED\n");
+                g_state.isPlaying = false;
+                g_state.userCallback(MP_EVENT_PLAYBACK_STOPPED, pEventHeader->hrEvent);
+                break;
 
-    case MFP_EVENT_TYPE_STOP:
-        LogDebugW(L"[Callback] MFP_EVENT_TYPE_STOP -> PLAYBACK_STOPPED\n");
-        g_state.isPlaying = false;
-        g_state.userCallback(MP_EVENT_PLAYBACK_STOPPED, pEventHeader->hrEvent);
-        break;
+            case MFP_EVENT_TYPE_POSITION_SET: {
+                // Check if we reached the end of the media
+                PROPVARIANT var;
+                PropVariantInit(&var);
 
-    case MFP_EVENT_TYPE_POSITION_SET:
-    {
-        // Vérifie si nous avons atteint la fin du média
-        PROPVARIANT var;
-        PropVariantInit(&var);
+                if (SUCCEEDED(g_state.player->GetDuration(MFP_POSITIONTYPE_100NS, &var))) {
+                    LONGLONG duration = 0;
+                    duration = var.hVal.QuadPart;
+                    PropVariantClear(&var);
 
-        LONGLONG duration = 0;
-        LONGLONG position = 0;
+                    if (SUCCEEDED(g_state.player->GetPosition(MFP_POSITIONTYPE_100NS, &var))) {
+                        LONGLONG position = 0;
+                        position = var.hVal.QuadPart;
+                        PropVariantClear(&var);
 
-        if (SUCCEEDED(g_state.player->GetDuration(MFP_POSITIONTYPE_100NS, &var))) {
-            duration = var.hVal.QuadPart;
-            PropVariantClear(&var);
-
-            if (SUCCEEDED(g_state.player->GetPosition(MFP_POSITIONTYPE_100NS, &var))) {
-                position = var.hVal.QuadPart;
-                PropVariantClear(&var);
-
-                if (position >= duration) {
-                    LogDebugW(L"[Callback] End of media detected\n");
-                    g_state.isPlaying = false;
-                    g_state.userCallback(MP_EVENT_PLAYBACK_ENDED, S_OK);
+                        if (position >= duration) {
+                            LogDebugW(L"[Callback] End of media detected\n");
+                            g_state.isPlaying = false;
+                            g_state.userCallback(MP_EVENT_PLAYBACK_ENDED, S_OK);
+                        }
+                    }
                 }
+                break;
             }
+            case MFP_EVENT_TYPE_ERROR:
+                // Error already handled above
+                break;
+
+            default:
+                // Log unhandled event type if needed
+                LogDebugW(L"[Callback] Unhandled event type: %d\n", pEventHeader->eEventType);
+                break;
         }
-        break;
+
+        LeaveCriticalSection(&g_state.lock);
     }
+};
 
-    case MFP_EVENT_TYPE_ERROR:
-        // Handled earlier with FAILED()
-        break;
-
-    default:
-        // Log unhandled event type if needed
-        LogDebugW(L"[Callback] Unhandled event type: %d\n", pEventHeader->eEventType);
-        break;
-    }
-
-    LeaveCriticalSection(&g_state.lock);
-}};
-
-// Keep a global pointer to our callback
-static MediaPlayerCallback* g_pCallback = nullptr;
+// Global pointer to the callback object
+static MediaPlayerCallback *g_pCallback = nullptr;
 
 // =================================================================
-// ThreadProc: Executes the Win32 message loop + initializes MFPlay
+// ThreadProc: Executes the Win32 message loop and initializes MFPlay
 // =================================================================
-static DWORD WINAPI MediaThreadProc(LPVOID lpParam)
-{
+static DWORD WINAPI MediaThreadProc(LPVOID lpParam) {
     HRESULT hr = S_OK;
 
-    // Initialize COM in STA
+    // Initialize COM in STA mode
     hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     if (FAILED(hr)) {
         LogDebugW(L"[MediaThreadProc] CoInitializeEx failed: 0x%08x\n", hr);
@@ -658,7 +637,7 @@ static DWORD WINAPI MediaThreadProc(LPVOID lpParam)
     }
 
     // Create the callback object
-    g_pCallback = new (std::nothrow) MediaPlayerCallback();
+    g_pCallback = new(std::nothrow) MediaPlayerCallback();
     if (!g_pCallback) {
         LogDebugW(L"[MediaThreadProc] new MediaPlayerCallback FAILED\n");
         MFShutdown();
@@ -669,16 +648,16 @@ static DWORD WINAPI MediaThreadProc(LPVOID lpParam)
     // Create the MFPlay player
     EnterCriticalSection(&g_state.lock);
     hr = MFPCreateMediaPlayer(
-        nullptr,               // URL: unnecessary, we'll use CreateMediaItemFromURL later
-        FALSE,              // Do not auto-start
-        0,                  // Flags (optional for further use)
-        g_pCallback,        // Callback pointer
-        g_hwndInit,         // HWND to display the video
+        nullptr, // URL: not needed here, will use CreateMediaItemFromURL later
+        FALSE, // Do not auto-start
+        0, // Optional flags for further use
+        g_pCallback, // Callback pointer
+        g_hwndInit, // Window handle for video display
         &g_state.player
     );
     if (SUCCEEDED(hr)) {
-        g_state.userCallback  = g_cbInit;
-        g_state.hwnd          = g_hwndInit;
+        g_state.userCallback = g_cbInit;
+        g_state.hwnd = g_hwndInit;
         g_state.isInitialized = true;
     } else {
         LogDebugW(L"[MediaThreadProc] MFPCreateMediaPlayer failed: 0x%08x\n", hr);
@@ -696,8 +675,7 @@ static DWORD WINAPI MediaThreadProc(LPVOID lpParam)
     // Win32 message loop required for MFPlay
     g_bThreadActive = true;
     MSG msg;
-    while (g_bThreadActive)
-    {
+    while (g_bThreadActive) {
         // Wait for a message to be available
         DWORD dwResult = MsgWaitForMultipleObjects(0, nullptr, FALSE, INFINITE, QS_ALLINPUT);
         if (dwResult == WAIT_FAILED) {
@@ -717,19 +695,19 @@ static DWORD WINAPI MediaThreadProc(LPVOID lpParam)
         }
     }
 
-    // Shutdown
+    // Shutdown procedure
     LogDebugW(L"[MediaThreadProc] Exiting message loop...\n");
 
-    // Cleanup
+    // Cleanup resources
     if (g_state.player) {
         g_state.player->Shutdown();
         g_state.player->Release();
         g_state.player = nullptr;
     }
-    if (g_pCallback) {
-        g_pCallback->Release();
-        g_pCallback = nullptr;
-    }
+
+    g_pCallback->Release();
+    g_pCallback = nullptr;
+
 
     MFShutdown();
     CoUninitialize();
@@ -741,9 +719,8 @@ static DWORD WINAPI MediaThreadProc(LPVOID lpParam)
 // External API Functions
 // =================================================================
 
-// 1) InitializeMediaPlayer
-HRESULT InitializeMediaPlayer(HWND hwnd, MEDIA_PLAYER_CALLBACK callback)
-{
+// 1) InitializeMediaPlayer: Initializes the media player with a window handle and callback
+HRESULT InitializeMediaPlayer(HWND hwnd, MEDIA_PLAYER_CALLBACK callback) {
     EnterCriticalSection(&g_state.lock);
 
     if (g_state.isInitialized) {
@@ -755,11 +732,11 @@ HRESULT InitializeMediaPlayer(HWND hwnd, MEDIA_PLAYER_CALLBACK callback)
         return MP_E_INVALID_PARAMETER;
     }
 
-    // Temporarily store
+    // Temporarily store initialization parameters
     g_hwndInit = hwnd;
-    g_cbInit   = callback;
+    g_cbInit = callback;
 
-    // Start the thread
+    // Start the media thread
     g_bThreadActive = false;
     g_hThread = CreateThread(
         nullptr,
@@ -775,13 +752,11 @@ HRESULT InitializeMediaPlayer(HWND hwnd, MEDIA_PLAYER_CALLBACK callback)
     }
 
     LeaveCriticalSection(&g_state.lock);
-
     return S_OK;
 }
 
-// 2) PlayFile
-HRESULT PlayFile(const wchar_t* filePath)
-{
+// 2) PlayFile: Plays a media file from a given file path
+HRESULT PlayFile(const wchar_t *filePath) {
     EnterCriticalSection(&g_state.lock);
     if (!g_state.isInitialized || !g_state.player) {
         LeaveCriticalSection(&g_state.lock);
@@ -794,58 +769,47 @@ HRESULT PlayFile(const wchar_t* filePath)
 
     g_state.hasVideo = false;
     g_state.isPlaying = false;
-    g_state.isLoading = true;  // Début du chargement
+    g_state.isLoading = true; // Start loading
 
     HRESULT hr = g_state.player->CreateMediaItemFromURL(filePath, FALSE, 0, nullptr);
     LogDebugW(L"[PlayFile] CreateMediaItemFromURL(%s) -> 0x%08x\n", filePath, hr);
 
     if (FAILED(hr)) {
-        g_state.isLoading = false;  // Échec du chargement
+        g_state.isLoading = false; // Loading failed
     }
 
     LeaveCriticalSection(&g_state.lock);
     return hr;
 }
 
-HRESULT PlayURL(const wchar_t* url)
-{
-    if (!url)
-    {
+// 3) PlayURL: Plays media from a given URL
+HRESULT PlayURL(const wchar_t *url) {
+    if (!url) {
         return MP_E_INVALID_PARAMETER;
     }
 
     EnterCriticalSection(&g_state.lock);
-
-    if (!g_state.isInitialized || !g_state.player)
-    {
+    if (!g_state.isInitialized || !g_state.player) {
         LeaveCriticalSection(&g_state.lock);
         return MP_E_NOT_INITIALIZED;
     }
 
     g_state.hasVideo = false;
     g_state.isPlaying = false;
-    g_state.isLoading = true;  // Début du chargement
+    g_state.isLoading = true; // Start loading
 
-    HRESULT hr = g_state.player->CreateMediaItemFromURL(
-        url,
-        FALSE,
-        0,
-        nullptr
-    );
-
+    HRESULT hr = g_state.player->CreateMediaItemFromURL(url, FALSE, 0, nullptr);
     if (FAILED(hr)) {
-        g_state.isLoading = false;  // Échec du chargement
+        g_state.isLoading = false; // Loading failed
     }
 
     LogDebugW(L"[PlayURL] CreateMediaItemFromURL(%s) -> 0x%08x\n", url, hr);
-
     LeaveCriticalSection(&g_state.lock);
     return hr;
 }
 
-// 3) PausePlayback
-HRESULT PausePlayback()
-{
+// 4) PausePlayback: Pauses the media playback
+HRESULT PausePlayback() {
     EnterCriticalSection(&g_state.lock);
     if (!g_state.isInitialized || !g_state.player) {
         LeaveCriticalSection(&g_state.lock);
@@ -859,9 +823,8 @@ HRESULT PausePlayback()
     return hr;
 }
 
-// 4) ResumePlayback
-HRESULT ResumePlayback()
-{
+// 5) ResumePlayback: Resumes the media playback
+HRESULT ResumePlayback() {
     EnterCriticalSection(&g_state.lock);
     if (!g_state.isInitialized || !g_state.player) {
         LeaveCriticalSection(&g_state.lock);
@@ -875,9 +838,8 @@ HRESULT ResumePlayback()
     return hr;
 }
 
-// 5) StopPlayback
-HRESULT StopPlayback()
-{
+// 6) StopPlayback: Stops the media playback
+HRESULT StopPlayback() {
     EnterCriticalSection(&g_state.lock);
     if (!g_state.isInitialized || !g_state.player) {
         LeaveCriticalSection(&g_state.lock);
@@ -891,9 +853,8 @@ HRESULT StopPlayback()
     return hr;
 }
 
-// 6) UpdateVideo
-void UpdateVideo()
-{
+// 7) UpdateVideo: Refreshes the video display if available
+void UpdateVideo() {
     EnterCriticalSection(&g_state.lock);
     if (g_state.player && g_state.hasVideo) {
         g_state.player->UpdateVideo();
@@ -901,9 +862,8 @@ void UpdateVideo()
     LeaveCriticalSection(&g_state.lock);
 }
 
-// 7) CleanupMediaPlayer
-void CleanupMediaPlayer()
-{
+// 8) CleanupMediaPlayer: Shuts down and cleans up the media player and associated resources
+void CleanupMediaPlayer() {
     EnterCriticalSection(&g_state.lock);
     LogDebugW(L"[CleanupMediaPlayer] Called\n");
 
@@ -911,7 +871,7 @@ void CleanupMediaPlayer()
     g_bThreadActive = false;
     LeaveCriticalSection(&g_state.lock);
 
-    // Optionally send WM_QUIT
+    // Optionally send WM_QUIT to the thread
     if (g_dwThreadId != 0) {
         PostThreadMessage(g_dwThreadId, WM_QUIT, 0, 0);
     }
@@ -926,11 +886,11 @@ void CleanupMediaPlayer()
 
     EnterCriticalSection(&g_state.lock);
     g_state.isInitialized = false;
-    g_state.isPlaying     = false;
-    g_state.isLoading     = false;
-    g_state.hasVideo      = false;
-    g_state.userCallback  = nullptr;
-    g_state.hwnd          = nullptr;
+    g_state.isPlaying = false;
+    g_state.isLoading = false;
+    g_state.hasVideo = false;
+    g_state.userCallback = nullptr;
+    g_state.hwnd = nullptr;
     if (g_state.audioVolume) {
         g_state.audioVolume->Release();
         g_state.audioVolume = nullptr;
@@ -946,18 +906,15 @@ void CleanupMediaPlayer()
     LeaveCriticalSection(&g_state.lock);
 }
 
-// 8) IsInitialized
-BOOL IsInitialized()
-{
+// 9) IsInitialized: Returns whether the media player is initialized
+BOOL IsInitialized() {
     return g_state.isInitialized;
 }
 
-// 9) HasVideo
-BOOL HasVideo()
-{
+// 10) HasVideo: Returns whether the current media contains video
+BOOL HasVideo() {
     return g_state.hasVideo;
 }
-
 
 // ============================
 // Static Initialization Block
@@ -966,6 +923,7 @@ struct InitOnce {
     InitOnce() {
         InitializeCriticalSection(&g_state.lock);
     }
+
     ~InitOnce() {
         DeleteCriticalSection(&g_state.lock);
     }

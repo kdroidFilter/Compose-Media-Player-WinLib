@@ -10,7 +10,7 @@
 
 #ifdef __cplusplus
 
-// Template pour libérer en toute sécurité les interfaces COM
+// Template to safely release COM interfaces
 template <class T>
 void SafeRelease(T **ppT)
 {
@@ -21,10 +21,10 @@ void SafeRelease(T **ppT)
     }
 }
 
-// Structure pour les dimensions de la vidéo
+// Structure for video dimensions
 struct VideoSize {
-    int width;    // Largeur
-    int height;   // Hauteur
+    int width;    // Width
+    int height;   // Height
     float ratio;  // Aspect ratio (width/height)
 };
 
@@ -72,31 +72,29 @@ MEDIAPLAYER_API HRESULT StopPlayback();
 MEDIAPLAYER_API void    UpdateVideo();
 MEDIAPLAYER_API void    CleanupMediaPlayer();
 
-// États du lecteur
+// Player states
 MEDIAPLAYER_API BOOL    IsInitialized();
 MEDIAPLAYER_API BOOL    HasVideo();
 MEDIAPLAYER_API BOOL    IsLoading();
-    MEDIAPLAYER_API BOOL    IsPlaying();
-
+MEDIAPLAYER_API BOOL    IsPlaying();
 
 // Volume
-MEDIAPLAYER_API HRESULT SetVolume(float level);    // niveau entre 0.0 et 1.0
+MEDIAPLAYER_API HRESULT SetVolume(float level);    // Level between 0.0 and 1.0
 MEDIAPLAYER_API HRESULT GetVolume(float* pLevel);
 MEDIAPLAYER_API HRESULT SetMute(BOOL bMute);
 MEDIAPLAYER_API HRESULT GetMute(BOOL* pbMute);
-    MEDIAPLAYER_API HRESULT GetChannelLevels(float* pLeft, float* pRight);
-
+MEDIAPLAYER_API HRESULT GetChannelLevels(float* pLeft, float* pRight);
 
 // Slider
-MEDIAPLAYER_API HRESULT GetDuration(LONGLONG* pDuration);  // Durée totale en 100ns units
-MEDIAPLAYER_API HRESULT GetCurrentPosition(LONGLONG* pPosition); // Position actuelle
-MEDIAPLAYER_API HRESULT SetPosition(LONGLONG position); // Définir la position
+MEDIAPLAYER_API HRESULT GetDuration(LONGLONG* pDuration);  // Total duration in 100ns units
+MEDIAPLAYER_API HRESULT GetCurrentPosition(LONGLONG* pPosition); // Current position
+MEDIAPLAYER_API HRESULT SetPosition(LONGLONG position); // Set the position
 
-    // Fonction pour obtenir les dimensions complètes de la vidéo
-    MEDIAPLAYER_API HRESULT GetVideoSize(VideoSize* pSize);
+// Function to get the full video dimensions
+MEDIAPLAYER_API HRESULT GetVideoSize(VideoSize* pSize);
 
-    // Fonction simplifiée pour obtenir uniquement l'aspect ratio
-    MEDIAPLAYER_API HRESULT GetVideoAspectRatio(float* pRatio);
+// Simplified function to get only the aspect ratio
+MEDIAPLAYER_API HRESULT GetVideoAspectRatio(float* pRatio);
 
 #ifdef __cplusplus
 }
