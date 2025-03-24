@@ -43,6 +43,8 @@ The project uses CMake for its build system. To build the library:
    cmake --build .
    ```
 
+> **Note:** This project is compiled using the **minsizedel** profile, which is configured to optimize the build size.
+
 This will generate the `NativeVideoPlayer.dll` along with the associated header files.
 
 ### Integration
@@ -102,7 +104,3 @@ This project is licensed under the MIT License. See the [LICENSE](LICENSE) file 
 ## Contributing
 
 Contributions to the ComposeMediaPlayer project are welcome. If you wish to contribute to NativeVideoPlayer or other parts of the project, please submit a pull request on GitHub.
-
----
-
-Feel free to modify this README to better suit your project needs.
