@@ -24,56 +24,59 @@ extern "C" {
 #define OFFSCREENPLAYER_API
 #endif
 
-// Codes d'erreur custom (exemple)
+// Custom error codes
 #define OP_E_NOT_INITIALIZED     ((HRESULT)0x80000001L)
 #define OP_E_ALREADY_INITIALIZED ((HRESULT)0x80000002L)
 #define OP_E_INVALID_PARAMETER   ((HRESULT)0x80000003L)
 
 // ====================================================================
-// Fonctions exportées
+// Exported functions
 // ====================================================================
 
 //
-// 1) Initialiser Media Foundation (à appeler UNE SEULE FOIS).
+// 1) Initialize Media Foundation once per process.
 //
 OFFSCREENPLAYER_API HRESULT InitMediaFoundation();
 
 //
-// 2) Ouvrir un fichier (ou URL) et préparer le décodage video+audio.
+// 2) Open a file (or URL) and prepare for video+audio decoding.
 //
-OFFSCREENPLAYER_API HRESULT OpenMedia(const wchar_t *url);
+OFFSCREENPLAYER_API HRESULT OpenMedia(const wchar_t* url);
 
 //
-// 3) Lire une frame vidéo en mémoire (RGB32).
-//    - pData : pointeur de pointeur vers les pixels
-//    - pDataSize : taille en octets
-//    Retourne : S_OK si ok, S_FALSE si fin de flux, ou E_FAIL si erreur.
+// 3) Read the next video frame in memory (RGB32).
+//    - pData: pointer to a pointer that receives the pixel data
+//    - pDataSize: receives the size in bytes
+//    Returns: S_OK if a frame is read, S_FALSE if end-of-stream, or E_FAIL on error.
 //
-OFFSCREENPLAYER_API HRESULT ReadVideoFrame(BYTE **pData, DWORD *pDataSize);
+OFFSCREENPLAYER_API HRESULT ReadVideoFrame(BYTE** pData, DWORD* pDataSize);
 
 //
-// 4) Libère la frame précédente (déverrouille le buffer).
+// 4) Unlock the previously read frame buffer.
 //
 OFFSCREENPLAYER_API HRESULT UnlockVideoFrame();
 
 //
-// 5) Fermer le flux et libérer les ressources Media Foundation.
+// 5) Close the media and free all associated resources.
 //
 OFFSCREENPLAYER_API void CloseMedia();
 
 //
-// 6) Contrôles basiques
+// 6) Basic controls
 //
-OFFSCREENPLAYER_API BOOL IsEOF(); // Fin de la vidéo ?
-OFFSCREENPLAYER_API HRESULT StartAudioPlayback(); // Démarre l'audio (thread interne)
-OFFSCREENPLAYER_API HRESULT StopAudioPlayback(); // Stoppe l'audio
+OFFSCREENPLAYER_API BOOL IsEOF();                     // Checks if video has reached the end
+OFFSCREENPLAYER_API HRESULT StartAudioPlayback();      // Starts audio in a dedicated thread
+OFFSCREENPLAYER_API HRESULT StopAudioPlayback();       // Stops audio playback
 
 //
-// 7) Récupérer la taille réelle de la vidéo (width, height).
+// 7) Retrieve the actual video dimensions (width, height).
 //
-OFFSCREENPLAYER_API void GetVideoSize(UINT32 *pWidth, UINT32 *pHeight);
+OFFSCREENPLAYER_API void GetVideoSize(UINT32* pWidth, UINT32* pHeight);
 
-OFFSCREENPLAYER_API HRESULT GetVideoFrameRate(UINT *pNum, UINT *pDenom);
+//
+// 8) Retrieve the current video frame rate (numerator, denominator).
+//
+OFFSCREENPLAYER_API HRESULT GetVideoFrameRate(UINT* pNum, UINT* pDenom);
 
 #ifdef __cplusplus
 }
