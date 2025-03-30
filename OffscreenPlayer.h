@@ -33,42 +33,91 @@ extern "C" {
 // Exported Functions for Offscreen Media Playback
 // ====================================================================
 
-// 1) Initialize Media Foundation (call once per process)
+/**
+ * @brief Initialize Media Foundation. Must be called once per process before using other functions.
+ * @return S_OK on success, or an error code (e.g., OP_E_ALREADY_INITIALIZED).
+ */
 OFFSCREENPLAYER_API HRESULT InitMediaFoundation();
 
-// 2) Open a media file or URL and prepare for decoding
+/**
+ * @brief Open a media file or URL and prepare for decoding with hardware acceleration.
+ * @param url The file path or URL of the media to open (wide string).
+ * @return S_OK on success, or an error code (e.g., OP_E_NOT_INITIALIZED).
+ */
 OFFSCREENPLAYER_API HRESULT OpenMedia(const wchar_t* url);
 
-// 3) Read the next video frame in RGB32 format.
-//    pData: receives pointer to the frame data
-//    pDataSize: receives the size in bytes of the frame buffer
-//    Returns: S_OK if a frame is read, S_FALSE if end-of-stream, or an error code.
+/**
+ * @brief Read the next video frame in RGB32 format, leveraging hardware decoding if available.
+ * @param pData Receives a pointer to the frame data (caller must not free this).
+ * @param pDataSize Receives the size in bytes of the frame buffer.
+ * @return S_OK if a frame is read, S_FALSE if end-of-stream, or an error code.
+ * @note Frame data is valid until UnlockVideoFrame is called.
+ */
 OFFSCREENPLAYER_API HRESULT ReadVideoFrame(BYTE** pData, DWORD* pDataSize);
 
-// 4) Unlock the video frame buffer previously locked by ReadVideoFrame.
+/**
+ * @brief Unlock the video frame buffer previously locked by ReadVideoFrame.
+ * @return S_OK on success.
+ */
 OFFSCREENPLAYER_API HRESULT UnlockVideoFrame();
 
-// 5) Close the media and free all associated resources.
+/**
+ * @brief Close the media and free all associated resources.
+ */
 OFFSCREENPLAYER_API void CloseMedia();
 
-// 6) Basic controls for audio playback and end-of-file check.
+/**
+ * @brief Check if the end of the media stream has been reached.
+ * @return TRUE if end-of-stream, FALSE otherwise.
+ */
 OFFSCREENPLAYER_API BOOL IsEOF();
+
+/**
+ * @brief Start or resume audio playback using WASAPI.
+ * @return S_OK on success, or an error code.
+ */
 OFFSCREENPLAYER_API HRESULT StartAudioPlayback();
+
+/**
+ * @brief Stop audio playback.
+ * @return S_OK on success, or an error code.
+ */
 OFFSCREENPLAYER_API HRESULT StopAudioPlayback();
 
-// 7) Retrieve the video dimensions (width and height).
+/**
+ * @brief Retrieve the video dimensions.
+ * @param pWidth Pointer to receive the width in pixels.
+ * @param pHeight Pointer to receive the height in pixels.
+ */
 OFFSCREENPLAYER_API void GetVideoSize(UINT32* pWidth, UINT32* pHeight);
 
-// 8) Retrieve the current video frame rate (numerator and denominator).
+/**
+ * @brief Retrieve the video frame rate.
+ * @param pNum Pointer to receive the numerator of the frame rate.
+ * @param pDenom Pointer to receive the denominator of the frame rate.
+ * @return S_OK on success, or an error code.
+ */
 OFFSCREENPLAYER_API HRESULT GetVideoFrameRate(UINT* pNum, UINT* pDenom);
 
-// 9) Seek to a specific position (in 100-nanosecond units)
+/**
+ * @brief Seek to a specific position in the media.
+ * @param llPosition The position to seek to, in 100-nanosecond units.
+ * @return S_OK on success, or an error code.
+ */
 OFFSCREENPLAYER_API HRESULT SeekMedia(LONGLONG llPosition);
 
-// 10) Get the total duration of the media (in 100-nanosecond units)
+/**
+ * @brief Get the total duration of the media.
+ * @param pDuration Pointer to receive the duration in 100-nanosecond units.
+ * @return S_OK on success, or an error code.
+ */
 OFFSCREENPLAYER_API HRESULT GetMediaDuration(LONGLONG* pDuration);
 
-// 11) Get the current playback position (in 100-nanosecond units)
+/**
+ * @brief Get the current playback position.
+ * @param pPosition Pointer to receive the current position in 100-nanosecond units.
+ * @return S_OK on success, or an error code.
+ */
 OFFSCREENPLAYER_API HRESULT GetMediaPosition(LONGLONG* pPosition);
 
 #ifdef __cplusplus
