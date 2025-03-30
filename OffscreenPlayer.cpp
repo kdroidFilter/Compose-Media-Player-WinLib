@@ -32,7 +32,7 @@ static IMMDeviceEnumerator* g_pEnumerator = nullptr;
 static IMMDevice* g_pDevice = nullptr;
 
 // Thread audio
-static HANDLE g_hAudioThread = NULL;
+static HANDLE g_hAudioThread = nullptr;
 static bool g_bAudioThreadRunning = false;
 
 // =============================================================
@@ -133,14 +133,14 @@ static HRESULT InitWASAPI()
         return S_OK; // Déjà initialisé
     }
 
-    HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL, CLSCTX_ALL,
+    HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
                                   IID_PPV_ARGS(&g_pEnumerator));
     if (FAILED(hr)) return hr;
 
     hr = g_pEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &g_pDevice);
     if (FAILED(hr)) return hr;
 
-    hr = g_pDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, (void**)&g_pAudioClient);
+    hr = g_pDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void **>(&g_pAudioClient));
     if (FAILED(hr)) return hr;
 
     // Récupère format "mix" Windows
@@ -156,14 +156,14 @@ static HRESULT InitWASAPI()
         hnsBufferDuration,
         0,
         pwfx,
-        NULL
+        nullptr
     );
     if (FAILED(hr)) {
         CoTaskMemFree(pwfx);
         return hr;
     }
 
-    hr = g_pAudioClient->GetService(__uuidof(IAudioRenderClient), (void**)&g_pRenderClient);
+    hr = g_pAudioClient->GetService(__uuidof(IAudioRenderClient), reinterpret_cast<void **>(&g_pRenderClient));
     CoTaskMemFree(pwfx);
     return hr;
 }
@@ -176,7 +176,7 @@ HRESULT InitMediaFoundation()
     if (g_bMFInitialized)
         return OP_E_ALREADY_INITIALIZED;
 
-    HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (SUCCEEDED(hr)) {
         hr = MFStartup(MF_VERSION);
     }
@@ -261,7 +261,7 @@ HRESULT OpenMedia(const wchar_t* url)
             if (SUCCEEDED(hr)) hr = MFSetAttributeRatio(pType, MF_MT_FRAME_RATE, 30, 1);
 
             if (SUCCEEDED(hr)) {
-                hr = g_pSourceReader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, pType);
+                hr = g_pSourceReader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, pType);
             }
             pType->Release();
         }
@@ -307,7 +307,7 @@ HRESULT OpenMedia(const wchar_t* url)
                 if (SUCCEEDED(hr)) hr = pTypeAudio->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
 
                 if (SUCCEEDED(hr)) {
-                    hr = g_pSourceReaderAudio->SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, NULL, pTypeAudio);
+                    hr = g_pSourceReaderAudio->SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, pTypeAudio);
                 }
                 pTypeAudio->Release();
             }
@@ -437,7 +437,7 @@ HRESULT StartAudioPlayback()
     }
 
     g_bAudioThreadRunning = true;
-    g_hAudioThread = CreateThread(NULL, 0, AudioThreadProc, NULL, 0, NULL);
+    g_hAudioThread = CreateThread(nullptr, 0, AudioThreadProc, nullptr, 0, nullptr);
     if (!g_hAudioThread) {
         g_bAudioThreadRunning = false;
         PrintHR("CreateThread(audio) fail", HRESULT_FROM_WIN32(GetLastError()));
@@ -457,7 +457,7 @@ HRESULT StopAudioPlayback()
     if (g_hAudioThread) {
         WaitForSingleObject(g_hAudioThread, INFINITE);
         CloseHandle(g_hAudioThread);
-        g_hAudioThread = NULL;
+        g_hAudioThread = nullptr;
     }
     g_bAudioPlaying = false;
     return S_OK;
@@ -507,4 +507,18 @@ void GetVideoSize(UINT32* pWidth, UINT32* pHeight)
 {
     if (pWidth)  *pWidth = g_videoWidth;
     if (pHeight) *pHeight = g_videoHeight;
+}
+
+HRESULT GetVideoFrameRate(UINT* pNum, UINT* pDenom)
+{
+    if (!g_pSourceReader || !pNum || !pDenom)
+        return OP_E_NOT_INITIALIZED;
+
+    IMFMediaType* pType = nullptr;
+    HRESULT hr = g_pSourceReader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &pType);
+    if (SUCCEEDED(hr)) {
+        hr = MFGetAttributeRatio(pType, MF_MT_FRAME_RATE, pNum, pDenom);
+        pType->Release();
+    }
+    return hr;
 }
