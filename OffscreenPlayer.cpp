@@ -50,10 +50,12 @@ static void PrintHR(const char* msg, HRESULT hr) {
 // Thread qui lit l'audio et l'envoie à WASAPI
 static DWORD WINAPI AudioThreadProc(LPVOID /*lpParam*/)
 {
-    if (!g_pAudioClient || !g_pRenderClient) {
-        PrintHR("AudioThreadProc: Missing AudioClient/RenderClient", E_FAIL);
+
+    if (!g_pAudioClient || !g_pRenderClient || !g_pSourceReaderAudio) {
+        PrintHR("AudioThreadProc: Missing AudioClient/RenderClient/SourceReaderAudio", E_FAIL);
         return 0;
     }
+
     HRESULT hr = g_pAudioClient->Start();
     if (FAILED(hr)) {
         PrintHR("AudioClient->Start failed", hr);
@@ -201,20 +203,62 @@ HRESULT OpenMedia(const wchar_t* url)
 
     HRESULT hr = S_OK;
 
-    // 1) Reader vidéo
-    hr = MFCreateSourceReaderFromURL(url, nullptr, &g_pSourceReader);
+    // 1) Créer des attributs pour le SourceReader
+    IMFAttributes* pAttributes = nullptr;
+    hr = MFCreateAttributes(&pAttributes, 2);
+    if (FAILED(hr)) {
+        PrintHR("MFCreateAttributes fail", hr);
+        return hr;
+    }
+
+    // Permet le décodage matériel pour H.264
+    hr = pAttributes->SetUINT32(MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, TRUE);
+    if (FAILED(hr)) {
+        PrintHR("SetUINT32(ENABLE_ADVANCED_VIDEO_PROCESSING) fail", hr);
+        pAttributes->Release();
+        return hr;
+    }
+
+    // Désactive les transformations (important pour MP4)
+    hr = pAttributes->SetUINT32(MF_SOURCE_READER_DISABLE_DXVA, FALSE);
+    if (FAILED(hr)) {
+        PrintHR("SetUINT32(DISABLE_DXVA) fail", hr);
+        pAttributes->Release();
+        return hr;
+    }
+
+    // 2) Reader vidéo avec attributs
+    hr = MFCreateSourceReaderFromURL(url, pAttributes, &g_pSourceReader);
+    pAttributes->Release();
+
     if (FAILED(hr)) {
         PrintHR("MFCreateSourceReaderFromURL(video) fail", hr);
         return hr;
     }
 
-    // 2) Sortie vidéo RGB32
+    // Configurer streams - désactiver streams inutiles
+    hr = g_pSourceReader->SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, FALSE);
+    if (FAILED(hr)) {
+        PrintHR("SetStreamSelection(ALL_STREAMS, FALSE) fail", hr);
+        return hr;
+    }
+
+    // Activer flux vidéo uniquement
+    hr = g_pSourceReader->SetStreamSelection(MF_SOURCE_READER_FIRST_VIDEO_STREAM, TRUE);
+    if (FAILED(hr)) {
+        PrintHR("SetStreamSelection(FIRST_VIDEO_STREAM, TRUE) fail", hr);
+        return hr;
+    }
+
+    // 3) Sortie vidéo RGB32
     {
         IMFMediaType* pType = nullptr;
         hr = MFCreateMediaType(&pType);
         if (SUCCEEDED(hr)) {
             hr = pType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
             if (SUCCEEDED(hr)) hr = pType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
+            // Définir un taux de trame fixe aide pour certains formats
+            if (SUCCEEDED(hr)) hr = MFSetAttributeRatio(pType, MF_MT_FRAME_RATE, 30, 1);
 
             if (SUCCEEDED(hr)) {
                 hr = g_pSourceReader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, pType);
@@ -235,38 +279,50 @@ HRESULT OpenMedia(const wchar_t* url)
         }
     }
 
-    // 3) Reader audio
+    // 4) Reader audio (même URL, nouvelle instance)
     hr = MFCreateSourceReaderFromURL(url, nullptr, &g_pSourceReaderAudio);
     if (FAILED(hr)) {
         PrintHR("MFCreateSourceReaderFromURL(audio) fail", hr);
-        return hr;
+        // On continue quand même, la vidéo peut fonctionner sans audio
+        g_pSourceReaderAudio = nullptr;
     }
-
-    // Sortie audio en PCM 16 bits, 2 canaux, 44100 Hz
-    {
-        IMFMediaType* pTypeAudio = nullptr;
-        hr = MFCreateMediaType(&pTypeAudio);
+    else {
+        // Configurer streams audio
+        hr = g_pSourceReaderAudio->SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, FALSE);
         if (SUCCEEDED(hr)) {
-            hr = pTypeAudio->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
-            if (SUCCEEDED(hr)) hr = pTypeAudio->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
-            if (SUCCEEDED(hr)) hr = pTypeAudio->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2);
-            if (SUCCEEDED(hr)) hr = pTypeAudio->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 44100);
-            if (SUCCEEDED(hr)) hr = pTypeAudio->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, 4);
-            if (SUCCEEDED(hr)) hr = pTypeAudio->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 44100 * 4);
-            if (SUCCEEDED(hr)) hr = pTypeAudio->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
-
-            if (SUCCEEDED(hr)) {
-                hr = g_pSourceReaderAudio->SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, NULL, pTypeAudio);
-            }
-            pTypeAudio->Release();
+            hr = g_pSourceReaderAudio->SetStreamSelection(MF_SOURCE_READER_FIRST_AUDIO_STREAM, TRUE);
         }
-        if (FAILED(hr)) {
-            PrintHR("SetCurrentMediaType(PCM) fail", hr);
-            return hr;
+
+        // Sortie audio en PCM 16 bits, 2 canaux, 44100 Hz
+        if (SUCCEEDED(hr)) {
+            IMFMediaType* pTypeAudio = nullptr;
+            hr = MFCreateMediaType(&pTypeAudio);
+            if (SUCCEEDED(hr)) {
+                hr = pTypeAudio->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+                if (SUCCEEDED(hr)) hr = pTypeAudio->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
+                if (SUCCEEDED(hr)) hr = pTypeAudio->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2);
+                if (SUCCEEDED(hr)) hr = pTypeAudio->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 44100);
+                if (SUCCEEDED(hr)) hr = pTypeAudio->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, 4);
+                if (SUCCEEDED(hr)) hr = pTypeAudio->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 44100 * 4);
+                if (SUCCEEDED(hr)) hr = pTypeAudio->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+
+                if (SUCCEEDED(hr)) {
+                    hr = g_pSourceReaderAudio->SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, NULL, pTypeAudio);
+                }
+                pTypeAudio->Release();
+            }
+            if (FAILED(hr)) {
+                PrintHR("SetCurrentMediaType(PCM) fail", hr);
+                // On continue quand même, la vidéo peut fonctionner sans audio
+                if (g_pSourceReaderAudio) {
+                    g_pSourceReaderAudio->Release();
+                    g_pSourceReaderAudio = nullptr;
+                }
+            }
         }
     }
 
-    return hr;
+    return S_OK;  // Retournez S_OK même si l'audio échoue
 }
 
 HRESULT ReadVideoFrame(BYTE** pData, DWORD* pDataSize)
