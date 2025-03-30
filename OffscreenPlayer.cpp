@@ -19,6 +19,7 @@ static DWORD g_lockedCurrSize = 0;
 // Actual video resolution
 static UINT32 g_videoWidth = 0;
 static UINT32 g_videoHeight = 0;
+static LONGLONG g_llCurrentPosition = 0;
 
 // Audio-related globals
 static IMFSourceReader* g_pSourceReaderAudio = nullptr;
@@ -490,6 +491,10 @@ HRESULT OpenMedia(const wchar_t* url)
 // Read a video frame (RGB32). This function synchronizes video presentation
 // with audio playback, taking into account the total pause duration.
 // ----------------------------------------------------------------------
+// ----------------------------------------------------------------------
+// Read a video frame (RGB32). This function synchronizes video presentation
+// with audio playback, taking into account the total pause duration.
+// ----------------------------------------------------------------------
 HRESULT ReadVideoFrame(BYTE** pData, DWORD* pDataSize)
 {
     if (!g_pSourceReader || !pData || !pDataSize)
@@ -530,10 +535,12 @@ HRESULT ReadVideoFrame(BYTE** pData, DWORD* pDataSize)
         return S_OK;
     }
 
+    // Update current playback position
+    g_llCurrentPosition = llTimestamp;
+
     // Synchronize video frame presentation
     ULONGLONG frameTimeMs = (ULONGLONG)(llTimestamp / 10000); // Convert from 100-ns to ms
     ULONGLONG currentTime = GetTickCount64();
-    // Calculate effective elapsed time (excluding total pause time)
     ULONGLONG effectiveElapsedTime = currentTime - g_llPlaybackStartTime - g_llTotalPauseTime;
     if (frameTimeMs > effectiveElapsedTime) {
         Sleep((DWORD)(frameTimeMs - effectiveElapsedTime));
@@ -763,3 +770,75 @@ HRESULT GetVideoFrameRate(UINT* pNum, UINT* pDenom)
     }
     return hr;
 }
+
+// ----------------------------------------------------------------------
+// Seek to a specific position (in 100-nanosecond units).
+// ----------------------------------------------------------------------
+HRESULT SeekMedia(LONGLONG llPosition)
+{
+    if (!g_pSourceReader)
+        return OP_E_NOT_INITIALIZED;
+
+    PROPVARIANT var;
+    PropVariantInit(&var);
+    var.vt = VT_I8;
+    var.hVal.QuadPart = llPosition;
+
+    HRESULT hr = g_pSourceReader->SetCurrentPosition(GUID_NULL, var);
+
+    if (FAILED(hr)) {
+        PrintHR("SetCurrentPosition failed", hr);
+    }
+
+    PropVariantClear(&var);
+    g_bEOF = FALSE;  // Réinitialiser EOF après Seek
+    return hr;
+}
+
+// ----------------------------------------------------------------------
+// Get the total duration of the media (in 100-nanosecond units).
+// ----------------------------------------------------------------------
+HRESULT GetMediaDuration(LONGLONG* pDuration)
+{
+    if (!g_pSourceReader || !pDuration)
+        return OP_E_NOT_INITIALIZED;
+
+    IMFMediaSource* pMediaSource = nullptr;
+    IMFPresentationDescriptor* pPresentationDescriptor = nullptr;
+
+    HRESULT hr = g_pSourceReader->GetServiceForStream(
+        MF_SOURCE_READER_MEDIASOURCE, GUID_NULL, IID_PPV_ARGS(&pMediaSource));
+
+    if (SUCCEEDED(hr))
+    {
+        hr = pMediaSource->CreatePresentationDescriptor(&pPresentationDescriptor);
+        if (SUCCEEDED(hr))
+        {
+            hr = pPresentationDescriptor->GetUINT64(MF_PD_DURATION, reinterpret_cast<UINT64*>(pDuration));
+            pPresentationDescriptor->Release();
+        }
+        pMediaSource->Release();
+    }
+
+    if (FAILED(hr))
+    {
+        PrintHR("GetMediaDuration failed", hr);
+    }
+
+    return hr;
+}
+
+// ----------------------------------------------------------------------
+// Get the current playback position (in 100-nanosecond units).
+// ----------------------------------------------------------------------
+
+HRESULT GetMediaPosition(LONGLONG* pPosition)
+{
+    if (!g_pSourceReader || !pPosition)
+        return OP_E_NOT_INITIALIZED;
+
+    *pPosition = g_llCurrentPosition;
+    return S_OK;
+}
+
+

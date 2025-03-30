@@ -9,6 +9,8 @@
 #include <mfreadwrite.h>
 #include <audioclient.h>
 #include <mmdeviceapi.h>
+#include <mfidl.h>
+
 
 #ifdef __cplusplus
 extern "C" {
@@ -61,6 +63,15 @@ OFFSCREENPLAYER_API void GetVideoSize(UINT32* pWidth, UINT32* pHeight);
 
 // 8) Retrieve current video frame rate (numerator, denominator).
 OFFSCREENPLAYER_API HRESULT GetVideoFrameRate(UINT* pNum, UINT* pDenom);
+
+// 9) Seek to a specific position (in 100-nanosecond units)
+OFFSCREENPLAYER_API HRESULT SeekMedia(LONGLONG llPosition);
+
+// 10) Get the total duration of the media (in 100-nanosecond units)
+OFFSCREENPLAYER_API HRESULT GetMediaDuration(LONGLONG* pDuration);
+
+// 11) Get the current playback position (in 100-nanosecond units)
+OFFSCREENPLAYER_API HRESULT GetMediaPosition(LONGLONG* pPosition);
 
 #ifdef __cplusplus
 }

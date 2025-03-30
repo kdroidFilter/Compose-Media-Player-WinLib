@@ -14,7 +14,7 @@ target_compile_definitions(OffscreenPlayer PRIVATE
         OFFSCREENPLAYER_EXPORTS
 )
 
-# Lien avec Media Foundation et WASAPI - ajout de mfsensorgroup et dxva2
+# Link with Media Foundation and WASAPI - adding mfsensorgroup and dxva2 for additional codec support
 target_link_libraries(OffscreenPlayer PRIVATE
         mf
         mfplat
@@ -24,6 +24,6 @@ target_link_libraries(OffscreenPlayer PRIVATE
         ole32
         oleaut32
         avrt
-        mfsensorgroup  # Pour support codec supplémentaires
-        dxva2          # Pour le décodage matériel H.264
+        mfsensorgroup  # For additional codec support
+        dxva2         # For H.264 hardware decoding
 )
