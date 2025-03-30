@@ -33,49 +33,33 @@ extern "C" {
 // Exported functions
 // ====================================================================
 
-//
 // 1) Initialize Media Foundation once per process.
-//
 OFFSCREENPLAYER_API HRESULT InitMediaFoundation();
 
-//
 // 2) Open a file (or URL) and prepare for video and audio decoding.
-//
 OFFSCREENPLAYER_API HRESULT OpenMedia(const wchar_t* url);
 
-//
 // 3) Read the next video frame in memory (RGB32).
-//    - pData: pointer to a pointer that receives the pixel data
-//    - pDataSize: receives the size in bytes
-//    Returns: S_OK if a frame is read, S_FALSE if end-of-stream, or E_FAIL on error.
-//
+//    pData: pointer to a pointer that receives the pixel data
+//    pDataSize: receives the size in bytes
+//    Returns: S_OK if a frame is read, S_FALSE if end-of-stream, or an error code.
 OFFSCREENPLAYER_API HRESULT ReadVideoFrame(BYTE** pData, DWORD* pDataSize);
 
-//
 // 4) Unlock the previously read frame buffer.
-//
 OFFSCREENPLAYER_API HRESULT UnlockVideoFrame();
 
-//
 // 5) Close the media and free all associated resources.
-//
 OFFSCREENPLAYER_API void CloseMedia();
 
-//
 // 6) Basic controls
-//
 OFFSCREENPLAYER_API BOOL IsEOF();                     // Checks if video has reached the end
-OFFSCREENPLAYER_API HRESULT StartAudioPlayback();      // Starts audio in a dedicated thread
-OFFSCREENPLAYER_API HRESULT StopAudioPlayback();       // Stops audio playback
+OFFSCREENPLAYER_API HRESULT StartAudioPlayback();      // Starts/resumes audio playback in a dedicated thread
+OFFSCREENPLAYER_API HRESULT StopAudioPlayback();       // Stops (pauses) audio playback
 
-//
 // 7) Retrieve the actual video dimensions (width, height).
-//
 OFFSCREENPLAYER_API void GetVideoSize(UINT32* pWidth, UINT32* pHeight);
 
-//
-// 8) Retrieve the current video frame rate (numerator, denominator).
-//
+// 8) Retrieve current video frame rate (numerator, denominator).
 OFFSCREENPLAYER_API HRESULT GetVideoFrameRate(UINT* pNum, UINT* pDenom);
 
 #ifdef __cplusplus
