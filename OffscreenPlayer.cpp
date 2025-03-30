@@ -1,16 +1,13 @@
 #define WIN32_LEAN_AND_MEAN
 #include "OffscreenPlayer.h"
-
 #include <cstdio>
 #include <new>
 #include <vector>
 
-// ------------------------------------------------------
 // Global variables (for demonstration; not "clean" design)
-// ------------------------------------------------------
 static bool g_bMFInitialized = false;
 
-// Video-related
+// Video-related globals
 static IMFSourceReader* g_pSourceReader = nullptr;
 static BOOL g_bEOF = FALSE;
 static IMFMediaBuffer* g_pLockedBuffer = nullptr;
@@ -22,27 +19,30 @@ static DWORD g_lockedCurrSize = 0;
 static UINT32 g_videoWidth = 0;
 static UINT32 g_videoHeight = 0;
 
-// Audio-related
+// Audio-related globals
 static IMFSourceReader* g_pSourceReaderAudio = nullptr;
 static bool g_bAudioPlaying = false;
 static bool g_bAudioInitialized = false;
 static bool g_bHasAudio = false;
 
-// WASAPI
+// WASAPI globals
 static IAudioClient* g_pAudioClient = nullptr;
 static IAudioRenderClient* g_pRenderClient = nullptr;
 static IMMDeviceEnumerator* g_pEnumerator = nullptr;
 static IMMDevice* g_pDevice = nullptr;
 static WAVEFORMATEX* g_pSourceAudioFormat = nullptr;
 
-// Audio thread
+// Audio thread globals
 static HANDLE g_hAudioThread = nullptr;
 static bool g_bAudioThreadRunning = false;
 static HANDLE g_hAudioReadyEvent = nullptr;  // Synchronization event for audio thread
 
-// ------------------------------------------------------
-// Helper function for debug
-// ------------------------------------------------------
+// Playback clock global (in milliseconds)
+static ULONGLONG g_llPlaybackStartTime = 0;
+
+// ------------------------------------------------------------------
+// Helper function for debugging
+// ------------------------------------------------------------------
 static void PrintHR(const char* msg, HRESULT hr)
 {
 #ifdef _DEBUG
@@ -52,9 +52,9 @@ static void PrintHR(const char* msg, HRESULT hr)
 #endif
 }
 
-// ------------------------------------------------------
+// ------------------------------------------------------------------
 // Thread procedure to process audio samples and feed WASAPI
-// ------------------------------------------------------
+// ------------------------------------------------------------------
 static DWORD WINAPI AudioThreadProc(LPVOID /*lpParam*/)
 {
     if (!g_pAudioClient || !g_pRenderClient || !g_pSourceReaderAudio) {
@@ -74,7 +74,7 @@ static DWORD WINAPI AudioThreadProc(LPVOID /*lpParam*/)
         return 0;
     }
 
-    // Audio is the "first audio stream" in this simple approach
+    // Audio is the first audio stream in this simple approach
     const DWORD audioStreamIndex = MF_SOURCE_READER_FIRST_AUDIO_STREAM;
 
     // Retrieve the size of the WASAPI buffer
@@ -99,7 +99,7 @@ static DWORD WINAPI AudioThreadProc(LPVOID /*lpParam*/)
         // Read one audio sample
         hr = g_pSourceReaderAudio->ReadSample(audioStreamIndex, 0, nullptr, &dwFlags, &llTimeStamp, &pSample);
         if (FAILED(hr)) {
-            PrintHR("ReadSample(audio) fail", hr);
+            PrintHR("ReadSample(audio) failed", hr);
             break;
         }
 
@@ -107,14 +107,26 @@ static DWORD WINAPI AudioThreadProc(LPVOID /*lpParam*/)
 #ifdef _DEBUG
             fprintf(stderr, "Audio stream ended\n");
 #endif
-            break; // end of audio
+            break; // End of audio stream
         }
 
         if (!pSample) {
-            // No new sample yet, wait briefly
+            // No new sample available, wait briefly
             Sleep(5);
             continue;
         }
+
+        // ---- Synchronize audio sample presentation ----
+        // Convert sample timestamp from 100-ns to ms and wait if needed
+        if (llTimeStamp > 0 && g_llPlaybackStartTime > 0) {
+            ULONGLONG sampleTimeMs = (ULONGLONG)(llTimeStamp / 10000);
+            ULONGLONG currentTime = GetTickCount64();
+            ULONGLONG elapsedTime = currentTime - g_llPlaybackStartTime;
+            if (sampleTimeMs > elapsedTime) {
+                Sleep((DWORD)(sampleTimeMs - elapsedTime));
+            }
+        }
+        // -------------------------------------------------
 
         bool sampleProcessed = false;
         while (!sampleProcessed && g_bAudioThreadRunning) {
@@ -125,49 +137,34 @@ static DWORD WINAPI AudioThreadProc(LPVOID /*lpParam*/)
                 DWORD cbMaxLen = 0, cbCurrLen = 0;
                 hr = pBuf->Lock(&pAudioData, &cbMaxLen, &cbCurrLen);
                 if (SUCCEEDED(hr)) {
-                    // Get the current padding in WASAPI buffer
+                    // Get current padding in WASAPI buffer
                     UINT32 numFramesPadding = 0;
                     hr = g_pAudioClient->GetCurrentPadding(&numFramesPadding);
                     if (SUCCEEDED(hr)) {
-                        // Number of frames available in WASAPI buffer
+                        // Calculate available frames in WASAPI buffer
                         UINT32 bufferFramesAvailable = bufferFrameCount - numFramesPadding;
 
-                        // Calculate how many frames are in our sample
-                        // Using blockAlign from the source wave format
+                        // Calculate number of frames in our sample using blockAlign from the source format
                         const UINT32 blockAlign = (g_pSourceAudioFormat) ? g_pSourceAudioFormat->nBlockAlign : 4;
-                        UINT32 framesInBuffer = 0;
-                        if (blockAlign > 0) {
-                            framesInBuffer = cbCurrLen / blockAlign;
-                        }
+                        UINT32 framesInBuffer = (blockAlign > 0) ? cbCurrLen / blockAlign : 0;
 
                         if (framesInBuffer > 0 && bufferFramesAvailable > 0) {
-                            // Decide how many frames we can write now
-                            UINT32 framesToWrite = (framesInBuffer > bufferFramesAvailable) ?
-                                                  bufferFramesAvailable : framesInBuffer;
+                            // Determine how many frames to write now
+                            UINT32 framesToWrite = (framesInBuffer > bufferFramesAvailable) ? bufferFramesAvailable : framesInBuffer;
 
-                            // Ask WASAPI for a pointer to the render buffer
+                            // Get pointer to the render buffer from WASAPI
                             BYTE* pDataRender = nullptr;
                             hr = g_pRenderClient->GetBuffer(framesToWrite, &pDataRender);
                             if (SUCCEEDED(hr) && pDataRender) {
                                 const DWORD bytesToCopy = framesToWrite * blockAlign;
 #ifdef _DEBUG
-                                fprintf(stderr, "Audio: Copying %u bytes (frames=%u)\n",
-                                        bytesToCopy, framesToWrite);
+                                fprintf(stderr, "Audio: Copying %u bytes (frames=%u)\n", bytesToCopy, framesToWrite);
 #endif
-                                // Copy the audio data
                                 memcpy(pDataRender, pAudioData, bytesToCopy);
-
-                                // Release the buffer (commit the data)
                                 g_pRenderClient->ReleaseBuffer(framesToWrite, 0);
 
-                                // If we wrote all frames, this sample is fully processed
-                                if (framesToWrite == framesInBuffer) {
-                                    sampleProcessed = true;
-                                } else {
-                                    // In a more advanced approach, we would handle partial writing,
-                                    // adjusting pointers, etc. For simplicity, mark as processed.
-                                    sampleProcessed = true;
-                                }
+                                // Mark sample as processed
+                                sampleProcessed = true;
                             } else {
                                 PrintHR("GetBuffer failed", hr);
                                 sampleProcessed = true;
@@ -211,26 +208,23 @@ static DWORD WINAPI AudioThreadProc(LPVOID /*lpParam*/)
     return 0;
 }
 
-// ------------------------------------------------------
+
+// ------------------------------------------------------------------
 // Initialize WASAPI with a given WAVEFORMATEX (if provided)
-// Otherwise, the device mix format is used (but here we
-// force a shared-mode approach).
-// ------------------------------------------------------
+// Otherwise, the device mix format is used (shared mode is forced)
+// ------------------------------------------------------------------
 static HRESULT InitWASAPI(WAVEFORMATEX* pSourceFormat = nullptr)
 {
     g_bAudioInitialized = false;
 
-    // If we already have a valid IAudioClient, skip re-initialization
+    // If already initialized, skip re-initialization
     if (g_pAudioClient && g_pRenderClient) {
         g_bAudioInitialized = true;
         return S_OK;
     }
 
-    // Create the device enumerator
-    HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator),
-                                  nullptr,
-                                  CLSCTX_ALL,
-                                  IID_PPV_ARGS(&g_pEnumerator));
+    // Create device enumerator
+    HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&g_pEnumerator));
     if (FAILED(hr)) {
         PrintHR("CoCreateInstance(MMDeviceEnumerator) failed", hr);
         return hr;
@@ -243,15 +237,14 @@ static HRESULT InitWASAPI(WAVEFORMATEX* pSourceFormat = nullptr)
         return hr;
     }
 
-    // Activate the IAudioClient
-    hr = g_pDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
-                             reinterpret_cast<void**>(&g_pAudioClient));
+    // Activate IAudioClient
+    hr = g_pDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&g_pAudioClient));
     if (FAILED(hr)) {
         PrintHR("Activate(IAudioClient) failed", hr);
         return hr;
     }
 
-    // If no source format is provided, get the device's mix format
+    // If no source format provided, get device's mix format
     WAVEFORMATEX* pwfxDevice = nullptr;
     if (!pSourceFormat) {
         hr = g_pAudioClient->GetMixFormat(&pwfxDevice);
@@ -264,26 +257,16 @@ static HRESULT InitWASAPI(WAVEFORMATEX* pSourceFormat = nullptr)
 
 #ifdef _DEBUG
     if (pSourceFormat) {
-        fprintf(stderr,
-                "InitWASAPI: channels=%u, samples/sec=%u, bits=%u, blockAlign=%u, avgBytes/sec=%u\n",
-                pSourceFormat->nChannels,
-                pSourceFormat->nSamplesPerSec,
-                pSourceFormat->wBitsPerSample,
-                pSourceFormat->nBlockAlign,
+        fprintf(stderr, "InitWASAPI: channels=%u, samples/sec=%u, bits=%u, blockAlign=%u, avgBytes/sec=%u\n",
+                pSourceFormat->nChannels, pSourceFormat->nSamplesPerSec,
+                pSourceFormat->wBitsPerSample, pSourceFormat->nBlockAlign,
                 pSourceFormat->nAvgBytesPerSec);
     }
 #endif
 
     // For shared mode, use a ~200ms buffer
-    REFERENCE_TIME hnsBufferDuration = 2000000; // 2,000,000 x 100 ns = 200 ms
-    hr = g_pAudioClient->Initialize(
-        AUDCLNT_SHAREMODE_SHARED,
-        0, // no special stream flags
-        hnsBufferDuration,
-        0, // periodicity
-        pSourceFormat,
-        nullptr
-    );
+    REFERENCE_TIME hnsBufferDuration = 2000000; // 200 ms
+    hr = g_pAudioClient->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, hnsBufferDuration, 0, pSourceFormat, nullptr);
     if (FAILED(hr)) {
         PrintHR("AudioClient->Initialize failed", hr);
         if (pwfxDevice) {
@@ -292,9 +275,8 @@ static HRESULT InitWASAPI(WAVEFORMATEX* pSourceFormat = nullptr)
         return hr;
     }
 
-    // Retrieve the IAudioRenderClient from the IAudioClient
-    hr = g_pAudioClient->GetService(__uuidof(IAudioRenderClient),
-                                    reinterpret_cast<void**>(&g_pRenderClient));
+    // Retrieve IAudioRenderClient from IAudioClient
+    hr = g_pAudioClient->GetService(__uuidof(IAudioRenderClient), reinterpret_cast<void**>(&g_pRenderClient));
     if (FAILED(hr)) {
         PrintHR("GetService(IAudioRenderClient) failed", hr);
     } else {
@@ -308,9 +290,9 @@ static HRESULT InitWASAPI(WAVEFORMATEX* pSourceFormat = nullptr)
     return hr;
 }
 
-// ------------------------------------------------------
-// Initialize Media Foundation (call once).
-// ------------------------------------------------------
+// ------------------------------------------------------------------
+// Initialize Media Foundation (call once per process)
+// ------------------------------------------------------------------
 HRESULT InitMediaFoundation()
 {
     if (g_bMFInitialized)
@@ -322,12 +304,10 @@ HRESULT InitMediaFoundation()
     }
     if (SUCCEEDED(hr)) {
         g_bMFInitialized = true;
-
-        // Create an event for audio-thread synchronization
+        // Create event for audio thread synchronization
         g_hAudioReadyEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
         if (!g_hAudioReadyEvent) {
             PrintHR("CreateEvent failed", HRESULT_FROM_WIN32(GetLastError()));
-            // We'll continue even if this fails, just without the event
         }
     } else {
         PrintHR("InitMediaFoundation failed", hr);
@@ -335,9 +315,9 @@ HRESULT InitMediaFoundation()
     return hr;
 }
 
-// ------------------------------------------------------
-// Open a media (URL or file) and prepare video+audio
-// ------------------------------------------------------
+// ------------------------------------------------------------------
+// Open media (URL or file) and prepare video and audio
+// ------------------------------------------------------------------
 HRESULT OpenMedia(const wchar_t* url)
 {
     if (!g_bMFInitialized)
@@ -355,20 +335,20 @@ HRESULT OpenMedia(const wchar_t* url)
 
     HRESULT hr = S_OK;
 
-    // ------------------------------------------------------
-    // 1) Create attributes for SourceReader (video)
-    // ------------------------------------------------------
+    // ------------------------------------------------------------------
+    // 1) Create attributes for video SourceReader
+    // ------------------------------------------------------------------
     IMFAttributes* pAttributes = nullptr;
     hr = MFCreateAttributes(&pAttributes, 2);
     if (FAILED(hr)) {
-        PrintHR("MFCreateAttributes fail", hr);
+        PrintHR("MFCreateAttributes failed", hr);
         return hr;
     }
 
     // Enable advanced video processing (better video pipeline)
     hr = pAttributes->SetUINT32(MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, TRUE);
     if (FAILED(hr)) {
-        PrintHR("SetUINT32(ENABLE_ADVANCED_VIDEO_PROCESSING) fail", hr);
+        PrintHR("SetUINT32(ENABLE_ADVANCED_VIDEO_PROCESSING) failed", hr);
         pAttributes->Release();
         return hr;
     }
@@ -376,17 +356,17 @@ HRESULT OpenMedia(const wchar_t* url)
     // Allow DXVA hardware acceleration
     hr = pAttributes->SetUINT32(MF_SOURCE_READER_DISABLE_DXVA, FALSE);
     if (FAILED(hr)) {
-        PrintHR("SetUINT32(DISABLE_DXVA) fail", hr);
+        PrintHR("SetUINT32(DISABLE_DXVA) failed", hr);
         pAttributes->Release();
         return hr;
     }
 
-    // Create the video SourceReader
+    // Create video SourceReader
     hr = MFCreateSourceReaderFromURL(url, pAttributes, &g_pSourceReader);
     pAttributes->Release();
 
     if (FAILED(hr)) {
-        PrintHR("MFCreateSourceReaderFromURL(video) fail", hr);
+        PrintHR("MFCreateSourceReaderFromURL(video) failed", hr);
         return hr;
     }
 
@@ -396,7 +376,7 @@ HRESULT OpenMedia(const wchar_t* url)
         hr = g_pSourceReader->SetStreamSelection(MF_SOURCE_READER_FIRST_VIDEO_STREAM, TRUE);
     }
     if (FAILED(hr)) {
-        PrintHR("Video StreamSelection fail", hr);
+        PrintHR("Video StreamSelection failed", hr);
         return hr;
     }
 
@@ -407,7 +387,7 @@ HRESULT OpenMedia(const wchar_t* url)
         if (SUCCEEDED(hr)) {
             hr = pType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
             if (SUCCEEDED(hr)) hr = pType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
-            // Optionally force a nominal frame rate to help certain decoders
+            // Optionally set nominal frame rate to help certain decoders
             if (SUCCEEDED(hr)) hr = MFSetAttributeRatio(pType, MF_MT_FRAME_RATE, 30, 1);
 
             if (SUCCEEDED(hr)) {
@@ -416,11 +396,11 @@ HRESULT OpenMedia(const wchar_t* url)
             pType->Release();
         }
         if (FAILED(hr)) {
-            PrintHR("SetCurrentMediaType(RGB32) fail", hr);
+            PrintHR("SetCurrentMediaType(RGB32) failed", hr);
             return hr;
         }
 
-        // Retrieve the actual video size
+        // Retrieve actual video size
         IMFMediaType* pCurrent = nullptr;
         hr = g_pSourceReader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &pCurrent);
         if (SUCCEEDED(hr) && pCurrent) {
@@ -432,13 +412,13 @@ HRESULT OpenMedia(const wchar_t* url)
         }
     }
 
-    // ------------------------------------------------------
+    // ------------------------------------------------------------------
     // 2) Create audio SourceReader separately
-    // ------------------------------------------------------
+    // ------------------------------------------------------------------
     hr = MFCreateSourceReaderFromURL(url, nullptr, &g_pSourceReaderAudio);
     if (FAILED(hr)) {
-        PrintHR("MFCreateSourceReaderFromURL(audio) fail", hr);
-        // No audio available, but we still succeed for video playback
+        PrintHR("MFCreateSourceReaderFromURL(audio) failed", hr);
+        // No audio available, continue with video playback
         g_pSourceReaderAudio = nullptr;
         return S_OK;
     }
@@ -449,17 +429,15 @@ HRESULT OpenMedia(const wchar_t* url)
         hr = g_pSourceReaderAudio->SetStreamSelection(MF_SOURCE_READER_FIRST_AUDIO_STREAM, TRUE);
     }
     if (FAILED(hr)) {
-        PrintHR("Audio StreamSelection fail", hr);
-        // We can continue with video only
+        PrintHR("Audio StreamSelection failed", hr);
         g_pSourceReaderAudio->Release();
         g_pSourceReaderAudio = nullptr;
         return S_OK;
     }
 
-    // ------------------------------------------------------
-    // 3) Force the audio to a standard PCM format (48kHz, 16-bit, stereo)
-    //    This ensures we match a common WASAPI format in shared mode.
-    // ------------------------------------------------------
+    // ------------------------------------------------------------------
+    // 3) Force audio to standard PCM format (48kHz, 16-bit, stereo)
+    // ------------------------------------------------------------------
     {
         IMFMediaType* pWantedType = nullptr;
         hr = MFCreateMediaType(&pWantedType);
@@ -470,31 +448,25 @@ HRESULT OpenMedia(const wchar_t* url)
             if (SUCCEEDED(hr)) hr = pWantedType->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2);
             if (SUCCEEDED(hr)) hr = pWantedType->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 48000);
             if (SUCCEEDED(hr)) hr = pWantedType->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, 4);       // 16-bit stereo => 4 bytes per frame
-            if (SUCCEEDED(hr)) hr = pWantedType->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 192000); // 48k * 4
+            if (SUCCEEDED(hr)) hr = pWantedType->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 192000); // 48000 * 4
             if (SUCCEEDED(hr)) hr = pWantedType->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
 
             if (SUCCEEDED(hr)) {
-                hr = g_pSourceReaderAudio->SetCurrentMediaType(
-                    MF_SOURCE_READER_FIRST_AUDIO_STREAM,
-                    nullptr,
-                    pWantedType
-                );
+                hr = g_pSourceReaderAudio->SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, pWantedType);
             }
             pWantedType->Release();
         }
         if (FAILED(hr)) {
-            PrintHR("SetCurrentMediaType(audio forced PCM) fail", hr);
-            // We can still continue without audio
+            PrintHR("SetCurrentMediaType(audio forced PCM) failed", hr);
             g_pSourceReaderAudio->Release();
             g_pSourceReaderAudio = nullptr;
             return S_OK;
         }
     }
 
-    // ------------------------------------------------------
-    // 4) Retrieve the chosen format from the SourceReader
-    //    and initialize WASAPI accordingly
-    // ------------------------------------------------------
+    // ------------------------------------------------------------------
+    // 4) Retrieve chosen audio format and initialize WASAPI accordingly
+    // ------------------------------------------------------------------
     {
         IMFMediaType* pActualType = nullptr;
         hr = g_pSourceReaderAudio->GetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, &pActualType);
@@ -503,46 +475,39 @@ HRESULT OpenMedia(const wchar_t* url)
             UINT32 size = 0;
             HRESULT hr2 = MFCreateWaveFormatExFromMFMediaType(pActualType, &pWfx, &size);
             if (SUCCEEDED(hr2) && pWfx) {
-                // Initialize WASAPI with the new PCM format
                 hr2 = InitWASAPI(pWfx);
                 if (FAILED(hr2)) {
                     PrintHR("InitWASAPI with forced PCM failed", hr2);
-                    // We'll continue with video only
                     g_pSourceReaderAudio->Release();
                     g_pSourceReaderAudio = nullptr;
                     CoTaskMemFree(pWfx);
                     pActualType->Release();
                     return S_OK;
                 }
-
-                // Store the wave format in a global pointer for reference
                 if (g_pSourceAudioFormat) {
                     CoTaskMemFree(g_pSourceAudioFormat);
                 }
                 g_pSourceAudioFormat = pWfx;
             }
-            if (pActualType) {
-                pActualType->Release();
-            }
+            pActualType->Release();
         }
-        // If it fails, we keep going with video only
     }
 
     g_bHasAudio = true;
     return S_OK;
 }
 
-// ------------------------------------------------------
-// Read a video frame (RGB32). pData gets the pointer,
-// pDataSize gets the size in bytes.
-// ------------------------------------------------------
-// ------------------------------------------------------
+// ------------------------------------------------------------------
+// Read a video frame (RGB32). pData receives the pointer,
+// pDataSize receives the size in bytes.
+// This function synchronizes video presentation with audio playback.
+// ------------------------------------------------------------------
 HRESULT ReadVideoFrame(BYTE** pData, DWORD* pDataSize)
 {
     if (!g_pSourceReader || !pData || !pDataSize)
         return OP_E_NOT_INITIALIZED;
 
-    // Unlock if still locked
+    // Unlock previously locked buffer if needed
     if (g_pLockedBuffer) {
         UnlockVideoFrame();
     }
@@ -559,16 +524,9 @@ HRESULT ReadVideoFrame(BYTE** pData, DWORD* pDataSize)
     LONGLONG llTimestamp = 0;
     IMFSample* pSample = nullptr;
 
-    HRESULT hr = g_pSourceReader->ReadSample(
-        MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-        0,
-        &streamIndex,
-        &dwFlags,
-        &llTimestamp,
-        &pSample
-    );
+    HRESULT hr = g_pSourceReader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &streamIndex, &dwFlags, &llTimestamp, &pSample);
     if (FAILED(hr)) {
-        PrintHR("ReadSample(video) fail", hr);
+        PrintHR("ReadSample(video) failed", hr);
         return hr;
     }
     if (dwFlags & MF_SOURCE_READERF_ENDOFSTREAM) {
@@ -579,51 +537,58 @@ HRESULT ReadVideoFrame(BYTE** pData, DWORD* pDataSize)
         return S_FALSE;
     }
     if (!pSample) {
-        // No frame available, so return OK but with no data
         *pData = nullptr;
         *pDataSize = 0;
         return S_OK;
     }
 
-    // Convert to contiguous buffer
+    // Synchronize video frame presentation based on sample timestamp
+    ULONGLONG frameTimeMs = (ULONGLONG)(llTimestamp / 10000); // Convert from 100-ns to ms
+    ULONGLONG currentTime = GetTickCount64();
+    if (g_llPlaybackStartTime > 0) {
+        ULONGLONG elapsedTime = currentTime - g_llPlaybackStartTime;
+        if (frameTimeMs > elapsedTime) {
+            Sleep((DWORD)(frameTimeMs - elapsedTime));
+        }
+    }
+
+    // Convert sample to contiguous buffer
     IMFMediaBuffer* pBuffer = nullptr;
     hr = pSample->ConvertToContiguousBuffer(&pBuffer);
     if (FAILED(hr)) {
-        PrintHR("ConvertToContiguousBuffer fail", hr);
+        PrintHR("ConvertToContiguousBuffer failed", hr);
         pSample->Release();
         return hr;
     }
 
-    // Lock the buffer
+    // Lock the buffer to access raw data
     BYTE* pBytes = nullptr;
     DWORD cbMaxLen = 0;
     DWORD cbCurrLen = 0;
     hr = pBuffer->Lock(&pBytes, &cbMaxLen, &cbCurrLen);
     if (FAILED(hr)) {
-        PrintHR("Buffer->Lock fail", hr);
+        PrintHR("Buffer->Lock failed", hr);
         pBuffer->Release();
         pSample->Release();
         return hr;
     }
 
-    // Store references for later unlock
+    // Store buffer references for later unlock
     g_pLockedBuffer = pBuffer;
     g_pLockedBytes = pBytes;
     g_lockedMaxSize = cbMaxLen;
     g_lockedCurrSize = cbCurrLen;
 
-    // Provide data to the caller
     *pData = pBytes;
     *pDataSize = cbCurrLen;
 
-    // Done with the sample, but keep pBuffer locked
     pSample->Release();
     return S_OK;
 }
 
-// ------------------------------------------------------
+// ------------------------------------------------------------------
 // Unlock the video frame buffer if locked
-// ------------------------------------------------------
+// ------------------------------------------------------------------
 HRESULT UnlockVideoFrame()
 {
     if (g_pLockedBuffer) {
@@ -637,17 +602,17 @@ HRESULT UnlockVideoFrame()
     return S_OK;
 }
 
-// ------------------------------------------------------
-// Check if end-of-file was reached
-// ------------------------------------------------------
+// ------------------------------------------------------------------
+// Check if end-of-file is reached
+// ------------------------------------------------------------------
 BOOL IsEOF()
 {
     return g_bEOF;
 }
 
-// ------------------------------------------------------
-// Start audio playback (launches the audio thread)
-// ------------------------------------------------------
+// ------------------------------------------------------------------
+// Start audio playback (launch audio thread)
+// ------------------------------------------------------------------
 HRESULT StartAudioPlayback()
 {
     if (!g_pSourceReaderAudio) {
@@ -658,7 +623,6 @@ HRESULT StartAudioPlayback()
     }
 
     if (g_bAudioPlaying) {
-        // Already playing
         return S_OK;
     }
 
@@ -670,16 +634,19 @@ HRESULT StartAudioPlayback()
         return E_FAIL;
     }
 
-    // Create and start the audio thread
+    // Record playback start time (synchronization clock)
+    g_llPlaybackStartTime = GetTickCount64();
+
+    // Create and start audio thread
     g_bAudioThreadRunning = true;
     g_hAudioThread = CreateThread(nullptr, 0, AudioThreadProc, nullptr, 0, nullptr);
     if (!g_hAudioThread) {
         g_bAudioThreadRunning = false;
-        PrintHR("CreateThread(audio) fail", HRESULT_FROM_WIN32(GetLastError()));
+        PrintHR("CreateThread(audio) failed", HRESULT_FROM_WIN32(GetLastError()));
         return HRESULT_FROM_WIN32(GetLastError());
     }
 
-    // Signal the audio thread to begin (if event is valid)
+    // Signal the audio thread to start if event is valid
     if (g_hAudioReadyEvent) {
         SetEvent(g_hAudioReadyEvent);
     }
@@ -691,9 +658,9 @@ HRESULT StartAudioPlayback()
     return S_OK;
 }
 
-// ------------------------------------------------------
-// Stop audio playback (stops the audio thread)
-// ------------------------------------------------------
+// ------------------------------------------------------------------
+// Stop audio playback (stop audio thread)
+// ------------------------------------------------------------------
 HRESULT StopAudioPlayback()
 {
     if (!g_bAudioPlaying) {
@@ -706,7 +673,6 @@ HRESULT StopAudioPlayback()
 
     g_bAudioThreadRunning = false;
     if (g_hAudioThread) {
-        // Wait for the thread to exit
         WaitForSingleObject(g_hAudioThread, 5000);
         CloseHandle(g_hAudioThread);
         g_hAudioThread = nullptr;
@@ -715,9 +681,9 @@ HRESULT StopAudioPlayback()
     return S_OK;
 }
 
-// ------------------------------------------------------
-// Close the media and release all resources
-// ------------------------------------------------------
+// ------------------------------------------------------------------
+// Close media and release all resources
+// ------------------------------------------------------------------
 void CloseMedia()
 {
     StopAudioPlayback();
@@ -726,7 +692,7 @@ void CloseMedia()
         UnlockVideoFrame();
     }
 
-    // Release WASAPI stuff
+    // Release WASAPI resources
     if (g_pAudioClient) {
         g_pAudioClient->Stop();
         g_pAudioClient->Release();
@@ -749,7 +715,7 @@ void CloseMedia()
         g_pSourceAudioFormat = nullptr;
     }
 
-    // Release the two SourceReaders
+    // Release SourceReaders
     if (g_pSourceReader) {
         g_pSourceReader->Release();
         g_pSourceReader = nullptr;
@@ -766,18 +732,18 @@ void CloseMedia()
     g_bAudioInitialized = false;
 }
 
-// ------------------------------------------------------
-// Return the detected video dimensions
-// ------------------------------------------------------
+// ------------------------------------------------------------------
+// Retrieve detected video dimensions
+// ------------------------------------------------------------------
 void GetVideoSize(UINT32* pWidth, UINT32* pHeight)
 {
     if (pWidth)  *pWidth = g_videoWidth;
     if (pHeight) *pHeight = g_videoHeight;
 }
 
-// ------------------------------------------------------
-// Retrieve the current video framerate (numerator, denominator)
-// ------------------------------------------------------
+// ------------------------------------------------------------------
+// Retrieve current video frame rate (numerator, denominator)
+// ------------------------------------------------------------------
 HRESULT GetVideoFrameRate(UINT* pNum, UINT* pDenom)
 {
     if (!g_pSourceReader || !pNum || !pDenom)

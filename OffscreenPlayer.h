@@ -39,7 +39,7 @@ extern "C" {
 OFFSCREENPLAYER_API HRESULT InitMediaFoundation();
 
 //
-// 2) Open a file (or URL) and prepare for video+audio decoding.
+// 2) Open a file (or URL) and prepare for video and audio decoding.
 //
 OFFSCREENPLAYER_API HRESULT OpenMedia(const wchar_t* url);
 
