@@ -9,7 +9,7 @@
 #include <audioclient.h>
 #include <mmdeviceapi.h>
 
-// Define export macro for Windows DLL
+// Export macro for Windows DLL
 #ifdef _WIN32
 #ifdef OFFSCREENPLAYER_EXPORTS
 #define OFFSCREENPLAYER_API __declspec(dllexport)

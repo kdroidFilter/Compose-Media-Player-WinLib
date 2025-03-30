@@ -1,7 +1,7 @@
 // OffscreenPlayer.cpp
-// This file contains the revised implementation for offscreen video and audio playback
+// Revised implementation for offscreen video and audio playback
 // using event‑driven mechanisms for WASAPI and preserving the original video frame rate.
-// Required Media Foundation and WASAPI headers are included.
+// Comments in English.
 
 #include "OffscreenPlayer.h"
 #include <cstdio>
@@ -41,7 +41,7 @@ static IAudioRenderClient* g_pRenderClient = nullptr;
 static IMMDeviceEnumerator* g_pEnumerator = nullptr;
 static IMMDevice* g_pDevice = nullptr;
 static WAVEFORMATEX* g_pSourceAudioFormat = nullptr;
-// New: Audio event handle for event‑driven mode
+// Audio event handle for event‑driven mode
 static HANDLE g_hAudioSamplesReadyEvent = nullptr;
 
 // Audio thread globals
@@ -201,7 +201,7 @@ static DWORD WINAPI AudioThreadProc(LPVOID /*lpParam*/)
         if (pSample) {
             pSample->Release();
         }
-        // Instead of a minimal Sleep, wait for the WASAPI event to signal new buffer availability
+        // Wait briefly for the next audio buffer event
         WaitForSingleObject(g_hAudioSamplesReadyEvent, 10);
     }
 
@@ -538,7 +538,7 @@ HRESULT ReadVideoFrame(BYTE** pData, DWORD* pDataSize)
     // Update the current playback position
     g_llCurrentPosition = llTimestamp;
 
-    // Synchronize frame presentation based on elapsed playback time
+    // Synchronize frame presentation based on playback start time
     ULONGLONG frameTimeMs = (ULONGLONG)(llTimestamp / 10000);
     ULONGLONG currentTime = GetTickCount64();
     ULONGLONG effectiveElapsedTime = currentTime - g_llPlaybackStartTime - g_llTotalPauseTime;
