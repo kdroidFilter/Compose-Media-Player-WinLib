@@ -620,20 +620,28 @@ OFFSCREENPLAYER_API HRESULT GetVideoFrameRate(UINT* pNum, UINT* pDenom) {
 }
 
 // Seek to a specific position
-OFFSCREENPLAYER_API HRESULT SeekMedia(LONGLONG llPosition) {
+OFFSCREENPLAYER_API HRESULT SeekMedia(LONGLONG llPositionInMs) {
     if (!g_pSourceReader) return OP_E_NOT_INITIALIZED;
+
+    // Convertir des millisecondes en unités de 100 ns
+    LONGLONG pos_100ns = llPositionInMs * 10000LL;
 
     PROPVARIANT var;
     PropVariantInit(&var);
     var.vt = VT_I8;
-    var.hVal.QuadPart = llPosition;
+    var.hVal.QuadPart = pos_100ns;
 
     HRESULT hr = g_pSourceReader->SetCurrentPosition(GUID_NULL, var);
-    if (FAILED(hr)) PrintHR("SetCurrentPosition failed", hr);
+    if (FAILED(hr)) {
+        PrintHR("SetCurrentPosition failed", hr);
+    }
     PropVariantClear(&var);
-    g_bEOF = FALSE; // Reset EOF after seeking
+
+    // Réinitialiser l’EOF après un Seek
+    g_bEOF = FALSE;
     return hr;
 }
+
 
 // Get media duration
 OFFSCREENPLAYER_API HRESULT GetMediaDuration(LONGLONG* pDuration) {
