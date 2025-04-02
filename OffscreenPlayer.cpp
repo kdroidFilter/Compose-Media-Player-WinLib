@@ -712,3 +712,25 @@ OFFSCREENPLAYER_API HRESULT SetPlaybackState(BOOL bPlaying) {
 
     return S_OK;
 }
+
+// Shutdown Media Foundation and cleanup all resources
+OFFSCREENPLAYER_API HRESULT ShutdownMediaFoundation() {
+    // First close any open media
+    CloseMedia();
+
+    HRESULT hr = S_OK;
+
+    // Shutdown Media Foundation
+    if (g_bMFInitialized) {
+        hr = MFShutdown();
+        if (FAILED(hr)) {
+            PrintHR("MFShutdown failed", hr);
+        }
+        g_bMFInitialized = false;
+    }
+
+    // Clean up COM
+    CoUninitialize();
+
+    return hr;
+}

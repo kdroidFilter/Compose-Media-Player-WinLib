@@ -112,6 +112,8 @@ OFFSCREENPLAYER_API HRESULT GetMediaPosition(LONGLONG *pPosition);
 
 OFFSCREENPLAYER_API HRESULT SetPlaybackState(BOOL bPlaying);
 
+OFFSCREENPLAYER_API HRESULT ShutdownMediaFoundation();
+
 #ifdef __cplusplus
 }
 #endif
