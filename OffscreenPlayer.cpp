@@ -458,6 +458,19 @@ OFFSCREENPLAYER_API HRESULT OpenMedia(const wchar_t* url) {
     return S_OK;
 }
 
+static void PreciseSleepHighRes(double milliseconds) {
+    if (milliseconds <= 0) return;
+
+    LARGE_INTEGER freq, start, end;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&start);
+
+    double target = milliseconds * freq.QuadPart / 1000.0;
+    do {
+        QueryPerformanceCounter(&end);
+    } while ((end.QuadPart - start.QuadPart) < target);
+}
+
 // Read a video frame with hardware decoding support
 OFFSCREENPLAYER_API HRESULT ReadVideoFrame(BYTE** pData, DWORD* pDataSize) {
     if (!g_pSourceReader || !pData || !pDataSize) return OP_E_NOT_INITIALIZED;
@@ -499,7 +512,7 @@ OFFSCREENPLAYER_API HRESULT ReadVideoFrame(BYTE** pData, DWORD* pDataSize) {
     ULONGLONG currentTime = GetCurrentTimeMs();
     ULONGLONG effectiveElapsedTime = currentTime - g_llPlaybackStartTime - g_llTotalPauseTime;
     if (frameTimeMs > effectiveElapsedTime) {
-        PreciseSleep((DWORD)(frameTimeMs - effectiveElapsedTime));
+        PreciseSleepHighRes((DWORD)(frameTimeMs - effectiveElapsedTime));
     }
 
     IMFMediaBuffer* pBuffer = nullptr;
