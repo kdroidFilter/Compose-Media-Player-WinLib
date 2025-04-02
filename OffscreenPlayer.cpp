@@ -23,7 +23,6 @@ static LONGLONG g_llCurrentPosition = 0;            // Current playback position
 
 // Audio-related globals
 static IMFSourceReader* g_pSourceReaderAudio = nullptr; // Source reader for audio
-static bool g_bAudioPlaying = false;                    // Audio playback state
 static bool g_bAudioInitialized = false;                // WASAPI initialization state
 static bool g_bHasAudio = false;                        // Indicates if media has audio
 static IAudioClient* g_pAudioClient = nullptr;          // WASAPI audio client
@@ -63,61 +62,79 @@ static void PrintHR(const char* msg, HRESULT hr) {
 #endif
 
 // Audio thread procedure for low-latency playback
-static DWORD WINAPI AudioThreadProc(LPVOID /*lpParam*/) {
+static DWORD WINAPI AudioThreadProc(LPVOID /*lpParam*/)
+{
+    // Vérification des composants audio
     if (!g_pAudioClient || !g_pRenderClient || !g_pSourceReaderAudio) {
-        PrintHR("AudioThreadProc: Missing audio components", E_FAIL);
+        PrintHR("AudioThreadProc: composants audio manquants", E_FAIL);
         return 0;
     }
 
-    // Wait for the audio thread to be signaled to start
+    // Attente du signal pour démarrer le thread audio
     if (g_hAudioReadyEvent) {
         WaitForSingleObject(g_hAudioReadyEvent, INFINITE);
     }
 
-    HRESULT hr = g_pAudioClient->Start();
-    if (FAILED(hr)) {
-        PrintHR("AudioClient->Start failed", hr);
-        return 0;
-    }
-
+    // Note : Le démarrage de l'AudioClient se fera via SetPlaybackState,
+    // ainsi, on ne l'initialise pas ici.
     const DWORD audioStreamIndex = MF_SOURCE_READER_FIRST_AUDIO_STREAM;
     UINT32 bufferFrameCount = 0;
-    hr = g_pAudioClient->GetBufferSize(&bufferFrameCount);
+    HRESULT hr = g_pAudioClient->GetBufferSize(&bufferFrameCount);
     if (FAILED(hr)) {
-        PrintHR("GetBufferSize failed", hr);
+        PrintHR("GetBufferSize a échoué", hr);
         return 0;
     }
 
     while (g_bAudioThreadRunning) {
+        // Si en pause, ne pas traiter l'audio
+        if (g_llPauseStart != 0) {
+            PreciseSleep(10);
+            continue;
+        }
+
         IMFSample* pSample = nullptr;
         DWORD dwFlags = 0;
         LONGLONG llTimeStamp = 0;
 
-        // Read next audio sample
+        // Lecture du prochain échantillon audio
         hr = g_pSourceReaderAudio->ReadSample(audioStreamIndex, 0, nullptr, &dwFlags, &llTimeStamp, &pSample);
         if (FAILED(hr)) {
-            PrintHR("ReadSample(audio) failed", hr);
+            PrintHR("ReadSample(audio) a échoué", hr);
             break;
         }
         if (dwFlags & MF_SOURCE_READERF_ENDOFSTREAM) {
-            if (pSample) pSample->Release();
+            if (pSample)
+                pSample->Release();
             break;
         }
         if (!pSample) {
-            PreciseSleep(1); // Avoid busy-waiting
+            PreciseSleep(1); // Évite une attente active
             continue;
         }
 
-        // Synchronize audio with playback clock
+        // Synchronisation audio avec l'horloge de lecture
         if (llTimeStamp > 0 && g_llPlaybackStartTime > 0) {
             ULONGLONG sampleTimeMs = (ULONGLONG)(llTimeStamp / 10000);
             ULONGLONG currentTime = GetCurrentTimeMs();
             ULONGLONG effectiveElapsedTime = currentTime - g_llPlaybackStartTime - g_llTotalPauseTime;
-            if (sampleTimeMs > effectiveElapsedTime) {
-                PreciseSleep((DWORD)(sampleTimeMs - effectiveElapsedTime));
+            int64_t diff = (int64_t)(sampleTimeMs - effectiveElapsedTime);
+
+            if (abs(diff) > 100) {
+                if (diff > 100) {
+                    // L'audio est en avance : attendre la différence
+                    PreciseSleep((DWORD)diff);
+                } else {
+                    // L'audio est en retard : passer cet échantillon
+                    pSample->Release();
+                    continue;
+                }
+            } else if (diff > 0) {
+                // Délai normal pour la synchronisation
+                PreciseSleep((DWORD)diff);
             }
         }
 
+        // Conversion de l'échantillon en tampon contigu
         IMFMediaBuffer* pBuf = nullptr;
         hr = pSample->ConvertToContiguousBuffer(&pBuf);
         if (FAILED(hr) || !pBuf) {
@@ -134,6 +151,7 @@ static DWORD WINAPI AudioThreadProc(LPVOID /*lpParam*/) {
             continue;
         }
 
+        // Récupération du padding actuel pour connaître la place restante dans le tampon
         UINT32 numFramesPadding = 0;
         hr = g_pAudioClient->GetCurrentPadding(&numFramesPadding);
         if (FAILED(hr)) {
@@ -155,7 +173,7 @@ static DWORD WINAPI AudioThreadProc(LPVOID /*lpParam*/) {
                 memcpy(pDataRender, pAudioData, bytesToCopy);
                 g_pRenderClient->ReleaseBuffer(framesToWrite, 0);
             } else {
-                PrintHR("GetBuffer failed", hr);
+                PrintHR("GetBuffer a échoué", hr);
             }
         }
 
@@ -163,7 +181,7 @@ static DWORD WINAPI AudioThreadProc(LPVOID /*lpParam*/) {
         pBuf->Release();
         pSample->Release();
 
-        // Event-driven wait to reduce CPU usage
+        // Attente événementielle pour réduire l'utilisation CPU
         WaitForSingleObject(g_hAudioSamplesReadyEvent, 5);
     }
 
@@ -406,6 +424,37 @@ OFFSCREENPLAYER_API HRESULT OpenMedia(const wchar_t* url) {
     }
 
     g_bHasAudio = true;
+    // Si nous avons de l'audio et que WASAPI est prêt, démarrer le thread audio
+    if (g_bHasAudio && g_bAudioInitialized) {
+        // Empêcher qu'un ancien thread tourne toujours
+        if (g_hAudioThread) {
+            // on ferme éventuellement l’ancien thread si besoin
+            WaitForSingleObject(g_hAudioThread, 5000);
+            CloseHandle(g_hAudioThread);
+            g_hAudioThread = nullptr;
+        }
+
+        g_bAudioThreadRunning = true;
+        g_hAudioThread = CreateThread(
+            nullptr,
+            0,
+            AudioThreadProc,
+            nullptr,
+            0,
+            nullptr
+        );
+
+        if (!g_hAudioThread) {
+            g_bAudioThreadRunning = false;
+            PrintHR("CreateThread(audio) failed", HRESULT_FROM_WIN32(GetLastError()));
+        } else {
+            // On signale au thread qu’il peut démarrer la lecture
+            if (g_hAudioReadyEvent) {
+                SetEvent(g_hAudioReadyEvent);
+            }
+        }
+    }
+
     return S_OK;
 }
 
@@ -502,56 +551,18 @@ OFFSCREENPLAYER_API BOOL IsEOF() {
     return g_bEOF;
 }
 
-// Start audio playback
-OFFSCREENPLAYER_API HRESULT StartAudioPlayback() {
-    if (!g_pSourceReaderAudio) {
-        PrintHR("No audio source available", E_FAIL);
-        return E_FAIL;
-    }
-    if (g_bAudioPlaying) return S_OK;
-    if (!g_bAudioInitialized) {
-        PrintHR("WASAPI not initialized", E_FAIL);
-        return E_FAIL;
-    }
-
-    if (g_llPlaybackStartTime == 0) {
-        g_llPlaybackStartTime = GetCurrentTimeMs();
-        g_llTotalPauseTime = 0;
-        g_llPauseStart = 0;
-    } else if (g_llPauseStart != 0) {
-        g_llTotalPauseTime += (GetCurrentTimeMs() - g_llPauseStart);
-        g_llPauseStart = 0;
-    }
-
-    g_bAudioThreadRunning = true;
-    g_hAudioThread = CreateThread(nullptr, 0, AudioThreadProc, nullptr, 0, nullptr);
-    if (!g_hAudioThread) {
-        g_bAudioThreadRunning = false;
-        PrintHR("CreateThread(audio) failed", HRESULT_FROM_WIN32(GetLastError()));
-        return HRESULT_FROM_WIN32(GetLastError());
-    }
-    if (g_hAudioReadyEvent) SetEvent(g_hAudioReadyEvent);
-    g_bAudioPlaying = true;
-    return S_OK;
-}
-
-// Stop audio playback
-OFFSCREENPLAYER_API HRESULT StopAudioPlayback() {
-    if (!g_bAudioPlaying) return S_OK;
+// Clean up all resources
+OFFSCREENPLAYER_API void CloseMedia() {
+    // Arrêter le thread audio s’il est en cours d’exécution
     g_bAudioThreadRunning = false;
     if (g_hAudioThread) {
+        // Attendre la fin
         WaitForSingleObject(g_hAudioThread, 5000);
         CloseHandle(g_hAudioThread);
         g_hAudioThread = nullptr;
     }
-    if (g_llPauseStart == 0) g_llPauseStart = GetCurrentTimeMs();
-    g_bAudioPlaying = false;
-    return S_OK;
-}
 
-// Clean up all resources
-OFFSCREENPLAYER_API void CloseMedia() {
-    StopAudioPlayback();
+    // Libération des ressources habituelles
     if (g_pLockedBuffer) UnlockVideoFrame();
     if (g_pAudioClient) {
         g_pAudioClient->Stop();
@@ -590,6 +601,7 @@ OFFSCREENPLAYER_API void CloseMedia() {
         CloseHandle(g_hAudioReadyEvent);
         g_hAudioReadyEvent = nullptr;
     }
+
     g_bEOF = FALSE;
     g_videoWidth = 0;
     g_videoHeight = 0;
@@ -599,6 +611,7 @@ OFFSCREENPLAYER_API void CloseMedia() {
     g_llTotalPauseTime = 0;
     g_llPauseStart = 0;
 }
+
 
 // Get video dimensions
 OFFSCREENPLAYER_API void GetVideoSize(UINT32* pWidth, UINT32* pHeight) {
@@ -642,7 +655,6 @@ OFFSCREENPLAYER_API HRESULT SeekMedia(LONGLONG llPositionInMs) {
     return hr;
 }
 
-
 // Get media duration
 OFFSCREENPLAYER_API HRESULT GetMediaDuration(LONGLONG* pDuration) {
     if (!g_pSourceReader || !pDuration) return OP_E_NOT_INITIALIZED;
@@ -666,5 +678,37 @@ OFFSCREENPLAYER_API HRESULT GetMediaDuration(LONGLONG* pDuration) {
 OFFSCREENPLAYER_API HRESULT GetMediaPosition(LONGLONG* pPosition) {
     if (!g_pSourceReader || !pPosition) return OP_E_NOT_INITIALIZED;
     *pPosition = g_llCurrentPosition;
+    return S_OK;
+}
+
+OFFSCREENPLAYER_API HRESULT SetPlaybackState(BOOL bPlaying) {
+    if (!g_bMFInitialized) return OP_E_NOT_INITIALIZED;
+
+    if (bPlaying) {
+        // Start playback timing
+        if (g_llPlaybackStartTime == 0) {
+            g_llPlaybackStartTime = GetCurrentTimeMs();
+        } else if (g_llPauseStart != 0) {
+            // Calculate and accumulate pause duration
+            g_llTotalPauseTime += (GetCurrentTimeMs() - g_llPauseStart);
+            g_llPauseStart = 0;
+        }
+
+        // Signal audio thread to play
+        if (g_bHasAudio && g_pAudioClient) {
+            g_pAudioClient->Start();
+        }
+    } else {
+        // Pause timing
+        if (g_llPauseStart == 0) {
+            g_llPauseStart = GetCurrentTimeMs();
+        }
+
+        // Pause audio
+        if (g_bHasAudio && g_pAudioClient) {
+            g_pAudioClient->Stop();
+        }
+    }
+
     return S_OK;
 }

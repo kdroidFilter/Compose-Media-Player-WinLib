@@ -44,7 +44,7 @@ OFFSCREENPLAYER_API HRESULT InitMediaFoundation();
  * @param url The file path or URL of the media to open (wide string).
  * @return S_OK on success, or an error code (e.g., OP_E_NOT_INITIALIZED).
  */
-OFFSCREENPLAYER_API HRESULT OpenMedia(const wchar_t* url);
+OFFSCREENPLAYER_API HRESULT OpenMedia(const wchar_t *url);
 
 /**
  * @brief Read the next video frame in RGB32 format, leveraging hardware decoding if available.
@@ -53,7 +53,7 @@ OFFSCREENPLAYER_API HRESULT OpenMedia(const wchar_t* url);
  * @return S_OK if a frame is read, S_FALSE if end-of-stream, or an error code.
  * @note Frame data is valid until UnlockVideoFrame is called.
  */
-OFFSCREENPLAYER_API HRESULT ReadVideoFrame(BYTE** pData, DWORD* pDataSize);
+OFFSCREENPLAYER_API HRESULT ReadVideoFrame(BYTE **pData, DWORD *pDataSize);
 
 /**
  * @brief Unlock the video frame buffer previously locked by ReadVideoFrame.
@@ -72,24 +72,13 @@ OFFSCREENPLAYER_API void CloseMedia();
  */
 OFFSCREENPLAYER_API BOOL IsEOF();
 
-/**
- * @brief Start or resume audio playback using WASAPI.
- * @return S_OK on success, or an error code.
- */
-OFFSCREENPLAYER_API HRESULT StartAudioPlayback();
-
-/**
- * @brief Stop audio playback.
- * @return S_OK on success, or an error code.
- */
-OFFSCREENPLAYER_API HRESULT StopAudioPlayback();
 
 /**
  * @brief Retrieve the video dimensions.
  * @param pWidth Pointer to receive the width in pixels.
  * @param pHeight Pointer to receive the height in pixels.
  */
-OFFSCREENPLAYER_API void GetVideoSize(UINT32* pWidth, UINT32* pHeight);
+OFFSCREENPLAYER_API void GetVideoSize(UINT32 *pWidth, UINT32 *pHeight);
 
 /**
  * @brief Retrieve the video frame rate.
@@ -97,7 +86,7 @@ OFFSCREENPLAYER_API void GetVideoSize(UINT32* pWidth, UINT32* pHeight);
  * @param pDenom Pointer to receive the denominator of the frame rate.
  * @return S_OK on success, or an error code.
  */
-OFFSCREENPLAYER_API HRESULT GetVideoFrameRate(UINT* pNum, UINT* pDenom);
+OFFSCREENPLAYER_API HRESULT GetVideoFrameRate(UINT *pNum, UINT *pDenom);
 
 /**
  * @brief Seek to a specific position in the media.
@@ -111,14 +100,17 @@ OFFSCREENPLAYER_API HRESULT SeekMedia(LONGLONG llPosition);
  * @param pDuration Pointer to receive the duration in 100-nanosecond units.
  * @return S_OK on success, or an error code.
  */
-OFFSCREENPLAYER_API HRESULT GetMediaDuration(LONGLONG* pDuration);
+OFFSCREENPLAYER_API HRESULT GetMediaDuration(LONGLONG *pDuration);
 
 /**
  * @brief Get the current playback position.
  * @param pPosition Pointer to receive the current position in 100-nanosecond units.
  * @return S_OK on success, or an error code.
  */
-OFFSCREENPLAYER_API HRESULT GetMediaPosition(LONGLONG* pPosition);
+OFFSCREENPLAYER_API HRESULT GetMediaPosition(LONGLONG *pPosition);
+
+
+OFFSCREENPLAYER_API HRESULT SetPlaybackState(BOOL bPlaying);
 
 #ifdef __cplusplus
 }
