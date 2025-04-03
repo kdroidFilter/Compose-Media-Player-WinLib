@@ -554,6 +554,7 @@ OFFSCREENPLAYER_API HRESULT ReadVideoFrame(BYTE** pData, DWORD* pDataSize)
         return S_OK;
     }
 
+
     // Get the master clock safely
     LONGLONG masterClock = 0;
     EnterCriticalSection(&g_csClockSync);
@@ -734,93 +735,83 @@ OFFSCREENPLAYER_API HRESULT GetVideoFrameRate(UINT* pNum, UINT* pDenom) {
 
 // Seek to a specific position
 OFFSCREENPLAYER_API HRESULT SeekMedia(LONGLONG llPositionIn100Ns) {
-    if (!g_pSourceReader) return OP_E_NOT_INITIALIZED;
+    if (!g_pSourceReader)
+        return OP_E_NOT_INITIALIZED;
 
-    // Temporarily pause playback
+    // 1. Libérer toute frame verrouillée
+    UnlockVideoFrame();
+
+    // 2. Mettre en pause si nécessaire
     BOOL wasPlaying = (g_llPauseStart == 0 && g_llPlaybackStartTime > 0);
     if (wasPlaying) {
-        SetPlaybackState(FALSE);  // Pause playback
+        SetPlaybackState(FALSE);  // Pause
     }
 
+    // 3. Flush avant le seek pour vider les buffers internes
+    g_pSourceReader->Flush(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
+    if (g_pSourceReaderAudio) {
+        g_pSourceReaderAudio->Flush(MF_SOURCE_READER_FIRST_AUDIO_STREAM);
+    }
+
+    // Préparer le seek
     PROPVARIANT var;
     PropVariantInit(&var);
     var.vt = VT_I8;
     var.hVal.QuadPart = llPositionIn100Ns;
 
-    // Seek video stream
+    // Effectuer le seek sur la vidéo
     HRESULT hr = g_pSourceReader->SetCurrentPosition(GUID_NULL, var);
-
-    // Seek audio stream if available
     if (SUCCEEDED(hr) && g_pSourceReaderAudio) {
         PROPVARIANT varAudio;
         PropVariantInit(&varAudio);
         varAudio.vt = VT_I8;
         varAudio.hVal.QuadPart = llPositionIn100Ns;
-
         hr = g_pSourceReaderAudio->SetCurrentPosition(GUID_NULL, varAudio);
         PropVariantClear(&varAudio);
     }
 
     if (SUCCEEDED(hr)) {
-        // Reset master clock after seeking
+        // 4. Réinitialiser immédiatement les timers et la master clock
         EnterCriticalSection(&g_csClockSync);
         g_llMasterClock = llPositionIn100Ns;
         LeaveCriticalSection(&g_csClockSync);
 
-        // Flush video stream
-        hr = g_pSourceReader->Flush(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
+        g_llCurrentPosition = llPositionIn100Ns;
+        g_llPlaybackStartTime = GetCurrentTimeMs() - (llPositionIn100Ns / 10000);
+        g_llTotalPauseTime = 0;
 
-        // Flush audio stream if exists
-        if (g_pSourceReaderAudio) {
-            g_pSourceReaderAudio->Flush(MF_SOURCE_READER_FIRST_AUDIO_STREAM);
-        }
-
-        // Reset playback timers
-        if (g_llPlaybackStartTime > 0) {
-            g_llPlaybackStartTime = GetCurrentTimeMs() - (llPositionIn100Ns / 10000);
-            g_llTotalPauseTime = 0;
-        }
-
-        // Stop and reset audio client to clear buffers
+        // Réinitialiser le client audio et le thread audio
         if (g_pAudioClient) {
             g_pAudioClient->Stop();
             g_pAudioClient->Reset();
         }
-
-        // Reset audio thread if audio exists
         if (g_bHasAudio && g_pSourceReaderAudio) {
             g_bAudioThreadRunning = false;
             if (g_hAudioThread) {
-                SetEvent(g_hAudioSamplesReadyEvent);  // Unblock WaitForSingleObject
+                SetEvent(g_hAudioSamplesReadyEvent);
                 WaitForSingleObject(g_hAudioThread, 5000);
                 CloseHandle(g_hAudioThread);
                 g_hAudioThread = nullptr;
             }
-
-            // Create a new audio thread
             g_bAudioThreadRunning = true;
             g_hAudioThread = CreateThread(nullptr, 0, AudioThreadProc, nullptr, 0, nullptr);
-
-            // Signal the audio thread to start
             if (g_hAudioReadyEvent) {
                 SetEvent(g_hAudioReadyEvent);
             }
         }
-
-        // Update current playback position
-        g_llCurrentPosition = llPositionIn100Ns;
     }
 
     PropVariantClear(&var);
     g_bEOF = FALSE;
 
-    // Restore previous playback state
+    // Restaurer l'état de lecture si nécessaire
     if (wasPlaying) {
-        SetPlaybackState(TRUE);  // Resume playback
+        SetPlaybackState(TRUE);  // Reprendre la lecture
     }
 
     return hr;
 }
+
 
 // Get media duration
 OFFSCREENPLAYER_API HRESULT GetMediaDuration(LONGLONG* pDuration) {
