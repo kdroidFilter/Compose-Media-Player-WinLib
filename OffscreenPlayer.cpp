@@ -481,34 +481,40 @@ OFFSCREENPLAYER_API HRESULT OpenMedia(const wchar_t* url) {
 
 // Modified PreciseSleepHighRes function for short durations
 static void PreciseSleepHighRes(double milliseconds) {
-    if (milliseconds <= 0.5) return; // Do not sleep for very short durations
+    if (milliseconds <= 0.1) return; // Return immediately for very short durations
 
     LARGE_INTEGER freq, start, end;
     QueryPerformanceFrequency(&freq);
     QueryPerformanceCounter(&start);
 
-    // For durations less than 10ms, use busy-waiting
-    if (milliseconds < 10.0) {
+    // For short durations (less than 5ms), use only busy-waiting for maximum precision
+    if (milliseconds < 5.0) {
         double target = milliseconds * freq.QuadPart / 1000.0;
         do {
             QueryPerformanceCounter(&end);
-            // Yield to other threads if under 75% of target time
-            if ((end.QuadPart - start.QuadPart) < target * 0.75) {
-                YieldProcessor();
-            }
+            // Yield to avoid hogging the CPU
+            YieldProcessor();
         } while ((end.QuadPart - start.QuadPart) < target);
     } else {
-        // For longer durations, use Sleep and finish with busy-waiting for precision
-        Sleep(static_cast<DWORD>(milliseconds - 1));
-        QueryPerformanceCounter(&start);
-        double target = 1.0 * freq.QuadPart / 1000.0;
+        // For longer durations, use Sleep for 80% of time
+        // then busy-wait for the remainder for precision
+        double sleepPortion = milliseconds * 0.8;
+        Sleep(static_cast<DWORD>(sleepPortion));
+
+        // Busy-wait for the rest
+        QueryPerformanceCounter(&start); // Reset starting point
+        double remainingTime = milliseconds - sleepPortion;
+        double target = remainingTime * freq.QuadPart / 1000.0;
+
         do {
             QueryPerformanceCounter(&end);
+            YieldProcessor();
         } while ((end.QuadPart - start.QuadPart) < target);
     }
 }
 
 // Read a video frame with hardware decoding support and improved AV sync
+// Modify the ReadVideoFrame function to better handle high frame rates
 OFFSCREENPLAYER_API HRESULT ReadVideoFrame(BYTE** pData, DWORD* pDataSize)
 {
     if (!g_pSourceReader || !pData || !pDataSize)
@@ -528,7 +534,7 @@ OFFSCREENPLAYER_API HRESULT ReadVideoFrame(BYTE** pData, DWORD* pDataSize)
     LONGLONG llTimestamp = 0;
     IMFSample* pSample = nullptr;
 
-    // Lecture de la prochaine frame vidéo
+    // Read the next video frame
     HRESULT hr = g_pSourceReader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &streamIndex, &dwFlags, &llTimestamp, &pSample);
     if (FAILED(hr)) {
         PrintHR("ReadSample(video) failed", hr);
@@ -548,40 +554,53 @@ OFFSCREENPLAYER_API HRESULT ReadVideoFrame(BYTE** pData, DWORD* pDataSize)
         return S_OK;
     }
 
-    // Récupération sécurisée du master clock
+    // Get the master clock safely
     LONGLONG masterClock = 0;
     EnterCriticalSection(&g_csClockSync);
     masterClock = g_llMasterClock;
     LeaveCriticalSection(&g_csClockSync);
 
-    // Synchronisation AV en se basant sur le master clock
+    // Get frame rate to adjust synchronization thresholds
+    UINT frameRateNum = 30, frameRateDenom = 1;
+    GetVideoFrameRate(&frameRateNum, &frameRateDenom);
+    double frameTimeMs = 1000.0 * frameRateDenom / frameRateNum;
+
+    // Calculate threshold for frame skipping based on frame rate
+    // For higher frame rates, be less aggressive with skipping
+    LONGLONG skipThreshold = static_cast<LONGLONG>(-frameTimeMs * 3 * 10000); // 3 frame times in 100ns units
+
+    // AV Sync based on master clock
     if (g_bHasAudio && masterClock > 0) {
         LONGLONG diff = llTimestamp - masterClock;
         if (diff > 0) {
-            DWORD sleepTime = static_cast<DWORD>(std::min(diff / 10000, static_cast<LONGLONG>(100)));
+            // Frame is ahead of audio - wait but don't wait more than one frame time
+            DWORD sleepTime = static_cast<DWORD>(std::min(diff / 10000, static_cast<LONGLONG>(frameTimeMs)));
             if (sleepTime > 1)
                 PreciseSleepHighRes(sleepTime);
-        } else if (diff < -500000) {
-            // Si la frame est trop en retard par rapport à l'audio, la sauter
+        } else if (diff < skipThreshold) {
+            // Frame is too far behind audio - skip it
+            // For 60fps, this will be around -50ms instead of a fixed -500ms
             pSample->Release();
             *pData = nullptr;
             *pDataSize = 0;
             return S_OK;
         }
     } else {
-        // Pour une lecture sans audio, utiliser le système de synchronisation basé sur l'horloge système
+        // For playback without audio, use system clock-based synchronization
         auto frameTimeMs = static_cast<ULONGLONG>(llTimestamp / 10000);
         ULONGLONG currentTime = GetCurrentTimeMs();
         ULONGLONG effectiveElapsedTime = currentTime - g_llPlaybackStartTime - g_llTotalPauseTime;
         if (frameTimeMs > effectiveElapsedTime) {
             DWORD sleepTime = static_cast<DWORD>(frameTimeMs - effectiveElapsedTime);
-            if (sleepTime > 30)
-                sleepTime = 30;
+            // Cap sleep time to prevent excessive waits, but adjust based on frame rate
+            DWORD maxSleepTime = static_cast<DWORD>(frameTimeMs * 1.5);
+            if (sleepTime > maxSleepTime)
+                sleepTime = maxSleepTime;
             PreciseSleepHighRes(sleepTime);
         }
     }
 
-    // Conversion de l'échantillon en buffer contigu
+    // Convert sample to contiguous buffer
     IMFMediaBuffer* pBuffer = nullptr;
     hr = pSample->ConvertToContiguousBuffer(&pBuffer);
     if (FAILED(hr)) {
@@ -600,10 +619,10 @@ OFFSCREENPLAYER_API HRESULT ReadVideoFrame(BYTE** pData, DWORD* pDataSize)
         return hr;
     }
 
-    // Mise à jour de la position globale de lecture
+    // Update global playback position
     g_llCurrentPosition = llTimestamp;
 
-    // Sauvegarder les informations du buffer verrouillé pour un déverrouillage ultérieur
+    // Save locked buffer information for later unlocking
     g_pLockedBuffer = pBuffer;
     g_pLockedBytes = pBytes;
     g_lockedMaxSize = cbMaxLen;
