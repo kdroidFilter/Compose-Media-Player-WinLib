@@ -26,4 +26,6 @@ target_link_libraries(OffscreenPlayer PRIVATE
         avrt
         mfsensorgroup  # For additional codec support
         dxva2         # For H.264 hardware decoding
+        d3d11     # Added D3D11 library
+        dxgi
 )

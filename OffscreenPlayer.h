@@ -9,7 +9,7 @@
 #include <audioclient.h>
 #include <mmdeviceapi.h>
 
-// Export macro for Windows DLL
+// Macro d'exportation pour la DLL Windows
 #ifdef _WIN32
 #ifdef OFFSCREENPLAYER_EXPORTS
 #define OFFSCREENPLAYER_API __declspec(dllexport)
@@ -20,7 +20,7 @@
 #define OFFSCREENPLAYER_API
 #endif
 
-// Custom error codes
+// Codes d'erreur personnalisés
 #define OP_E_NOT_INITIALIZED     ((HRESULT)0x80000001L)
 #define OP_E_ALREADY_INITIALIZED ((HRESULT)0x80000002L)
 #define OP_E_INVALID_PARAMETER   ((HRESULT)0x80000003L)
@@ -30,88 +30,95 @@ extern "C" {
 #endif
 
 // ====================================================================
-// Exported Functions for Offscreen Media Playback
+// Fonctions exportées pour la lecture multimédia Offscreen
 // ====================================================================
 
 /**
- * @brief Initialize Media Foundation. Must be called once per process before using other functions.
- * @return S_OK on success, or an error code (e.g., OP_E_ALREADY_INITIALIZED).
+ * @brief Initialise Media Foundation, Direct3D11 et le gestionnaire DXGI.
+ * @return S_OK en cas de succès, ou un code d'erreur.
  */
 OFFSCREENPLAYER_API HRESULT InitMediaFoundation();
 
 /**
- * @brief Open a media file or URL and prepare for decoding with hardware acceleration.
- * @param url The file path or URL of the media to open (wide string).
- * @return S_OK on success, or an error code (e.g., OP_E_NOT_INITIALIZED).
+ * @brief Ouvre un média (fichier ou URL) et prépare le décodage avec accélération matérielle.
+ * @param url Chemin ou URL du média (chaine large).
+ * @return S_OK en cas de succès, ou un code d'erreur.
  */
 OFFSCREENPLAYER_API HRESULT OpenMedia(const wchar_t *url);
 
 /**
- * @brief Read the next video frame in RGB32 format, leveraging hardware decoding if available.
- * @param pData Receives a pointer to the frame data (caller must not free this).
- * @param pDataSize Receives the size in bytes of the frame buffer.
- * @return S_OK if a frame is read, S_FALSE if end-of-stream, or an error code.
- * @note Frame data is valid until UnlockVideoFrame is called.
+ * @brief Lit la prochaine frame vidéo en format RGB32 (via conversion si nécessaire) avec synchronisation AV améliorée.
+ * @param pData Reçoit un pointeur sur les données de la frame (à ne pas libérer).
+ * @param pDataSize Reçoit la taille en octets du tampon.
+ * @return S_OK si une frame est lue, S_FALSE en fin de flux, ou un code d'erreur.
+ * @note Les données restent valides jusqu'à l'appel de UnlockVideoFrame.
  */
 OFFSCREENPLAYER_API HRESULT ReadVideoFrame(BYTE **pData, DWORD *pDataSize);
 
 /**
- * @brief Unlock the video frame buffer previously locked by ReadVideoFrame.
- * @return S_OK on success.
+ * @brief Déverrouille le tampon de la frame vidéo précédemment verrouillé par ReadVideoFrame.
+ * @return S_OK en cas de succès.
  */
 OFFSCREENPLAYER_API HRESULT UnlockVideoFrame();
 
 /**
- * @brief Close the media and free all associated resources.
+ * @brief Ferme le média et libère toutes les ressources associées.
  */
 OFFSCREENPLAYER_API void CloseMedia();
 
 /**
- * @brief Check if the end of the media stream has been reached.
- * @return TRUE if end-of-stream, FALSE otherwise.
+ * @brief Indique si la fin du flux média a été atteinte.
+ * @return TRUE si fin de flux, FALSE sinon.
  */
 OFFSCREENPLAYER_API BOOL IsEOF();
 
-
 /**
- * @brief Retrieve the video dimensions.
- * @param pWidth Pointer to receive the width in pixels.
- * @param pHeight Pointer to receive the height in pixels.
+ * @brief Récupère les dimensions de la vidéo.
+ * @param pWidth Pointeur pour recevoir la largeur en pixels.
+ * @param pHeight Pointeur pour recevoir la hauteur en pixels.
  */
 OFFSCREENPLAYER_API void GetVideoSize(UINT32 *pWidth, UINT32 *pHeight);
 
 /**
- * @brief Retrieve the video frame rate.
- * @param pNum Pointer to receive the numerator of the frame rate.
- * @param pDenom Pointer to receive the denominator of the frame rate.
- * @return S_OK on success, or an error code.
+ * @brief Récupère le taux de rafraîchissement (frame rate) de la vidéo.
+ * @param pNum Pointeur pour recevoir le numérateur.
+ * @param pDenom Pointeur pour recevoir le dénominateur.
+ * @return S_OK en cas de succès, ou un code d'erreur.
  */
 OFFSCREENPLAYER_API HRESULT GetVideoFrameRate(UINT *pNum, UINT *pDenom);
 
 /**
- * @brief Seek to a specific position in the media.
- * @param llPosition The position to seek to, in 100-nanosecond units.
- * @return S_OK on success, or an error code.
+ * @brief Recherche une position spécifique dans le média.
+ * @param llPosition Position (en 100-ns) à atteindre.
+ * @return S_OK en cas de succès, ou un code d'erreur.
  */
 OFFSCREENPLAYER_API HRESULT SeekMedia(LONGLONG llPosition);
 
 /**
- * @brief Get the total duration of the media.
- * @param pDuration Pointer to receive the duration in 100-nanosecond units.
- * @return S_OK on success, or an error code.
+ * @brief Obtient la durée totale du média.
+ * @param pDuration Pointeur pour recevoir la durée (en 100-ns).
+ * @return S_OK en cas de succès, ou un code d'erreur.
  */
 OFFSCREENPLAYER_API HRESULT GetMediaDuration(LONGLONG *pDuration);
 
 /**
- * @brief Get the current playback position.
- * @param pPosition Pointer to receive the current position in 100-nanosecond units.
- * @return S_OK on success, or an error code.
+ * @brief Obtient la position de lecture courante.
+ * @param pPosition Pointeur pour recevoir la position (en 100-ns).
+ * @return S_OK en cas de succès, ou un code d'erreur.
  */
 OFFSCREENPLAYER_API HRESULT GetMediaPosition(LONGLONG *pPosition);
 
-
+/**
+ * @brief Définit l'état de lecture (lecture ou pause).
+ * @param bPlaying TRUE pour lecture, FALSE pour pause.
+ * @return S_OK en cas de succès, ou un code d'erreur.
+ */
 OFFSCREENPLAYER_API HRESULT SetPlaybackState(BOOL bPlaying);
 
+/**
+ * @brief Arrête Media Foundation et libère toutes les ressources.
+ * @return S_OK en cas de succès, ou un code d'erreur.
+ */
 OFFSCREENPLAYER_API HRESULT ShutdownMediaFoundation();
 
 #ifdef __cplusplus
