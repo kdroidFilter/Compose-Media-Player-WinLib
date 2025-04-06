@@ -59,6 +59,7 @@ static UINT32 g_dwResetToken = 0;
 static BOOL g_bSeekInProgress = FALSE;
 
 static IAudioEndpointVolume* g_pAudioEndpointVolume = nullptr;
+static IAudioMeterInformation* g_pAudioMeterInfo = nullptr;
 
 
 // Remplacement de GetTickCount64() par std::chrono::steady_clock
@@ -812,4 +813,41 @@ OFFSCREENPLAYER_API HRESULT GetAudioVolume(float* volume)
 
     HRESULT hr = g_pAudioEndpointVolume->GetMasterVolumeLevelScalar(volume);
     return hr;
+}
+
+OFFSCREENPLAYER_API HRESULT GetAudioLevels(float* pLeftLevel, float* pRightLevel) {
+    if (!pLeftLevel || !pRightLevel)
+        return OP_E_INVALID_PARAMETER;
+
+    // Réactive l'interface IAudioMeterInformation à chaque appel
+    IAudioMeterInformation* pAudioMeterInfo = nullptr;
+    HRESULT hr = g_pDevice->Activate(__uuidof(IAudioMeterInformation), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&pAudioMeterInfo));
+    if (FAILED(hr))
+        return hr;
+
+    float peaks[2] = { 0.0f, 0.0f };
+    hr = pAudioMeterInfo->GetChannelsPeakValues(2, peaks);
+    pAudioMeterInfo->Release();
+    if (FAILED(hr))
+        return hr;
+
+    // Conversion des valeurs linéaires en décibels puis en pourcentage, similaire à l'approche mac
+    auto convertToPercentage = [](float level) -> float {
+        if (level <= 0.f)
+            return 0.f;
+        // Conversion en décibels : 20 * log10(level)
+        float db = 20.f * log10(level);
+        // On suppose que -60 dB correspond au silence et 0 dB au niveau maximal
+        float normalized = (db + 60.f) / 60.f;
+        if (normalized < 0.f)
+            normalized = 0.f;
+        if (normalized > 1.f)
+            normalized = 1.f;
+        return normalized * 100.f;
+    };
+
+    *pLeftLevel  = convertToPercentage(peaks[0]);
+    *pRightLevel = convertToPercentage(peaks[1]);
+
+    return S_OK;
 }
