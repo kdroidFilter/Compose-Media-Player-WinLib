@@ -61,23 +61,25 @@ static inline ULONGLONG GetCurrentTimeMs() {
         std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
-// Implémentation modernisée de PreciseSleepHighRes avec std::chrono
+// Implémentation modernisée de PreciseSleepHighRes utilisant CreateWaitableTimer pour éviter une busy-wait
 static void PreciseSleepHighRes(double ms) {
     if (ms <= 0.1)
         return;
 
-    using clock = std::chrono::steady_clock;
-    if (ms < 5.0) {
-        auto target = clock::now() + std::chrono::duration<double, std::milli>(ms);
-        while (clock::now() < target)
-            std::this_thread::yield();
-    } else {
-        double sleepPortion = ms * 0.8;
-        std::this_thread::sleep_for(std::chrono::duration<double, std::milli>(sleepPortion));
-        auto target = clock::now() + std::chrono::duration<double, std::milli>(ms - sleepPortion);
-        while (clock::now() < target)
-            std::this_thread::yield();
+    // Créer un timer haute résolution
+    HANDLE hTimer = CreateWaitableTimer(nullptr, TRUE, nullptr);
+    if (!hTimer) {
+        // En cas d'échec, on retombe sur sleep_for
+        std::this_thread::sleep_for(std::chrono::duration<double, std::milli>(ms));
+        return;
     }
+
+    LARGE_INTEGER liDueTime;
+    // Convertir le temps en intervalles de 100 ns et utiliser une valeur négative pour un délai relatif
+    liDueTime.QuadPart = -static_cast<LONGLONG>(ms * 10000.0);
+    if (SetWaitableTimer(hTimer, &liDueTime, 0, nullptr, nullptr, FALSE))
+        WaitForSingleObject(hTimer, INFINITE);
+    CloseHandle(hTimer);
 }
 
 static HRESULT CreateDX11Device() {
