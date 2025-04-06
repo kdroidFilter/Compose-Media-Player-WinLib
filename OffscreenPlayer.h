@@ -121,6 +121,20 @@ OFFSCREENPLAYER_API HRESULT SetPlaybackState(BOOL bPlaying);
  */
 OFFSCREENPLAYER_API HRESULT ShutdownMediaFoundation();
 
+/**
+ * @brief Définit le niveau de volume audio.
+ * @param volume Niveau de volume à appliquer (entre 0.0 pour muet et 1.0 pour le volume maximum).
+ * @return S_OK en cas de succès, ou un code d'erreur.
+ */
+OFFSCREENPLAYER_API HRESULT SetAudioVolume(float volume);
+
+/**
+ * @brief Récupère le niveau de volume audio actuel.
+ * @param volume Pointeur pour recevoir le niveau de volume (entre 0.0 et 1.0).
+ * @return S_OK en cas de succès, ou un code d'erreur.
+ */
+OFFSCREENPLAYER_API HRESULT GetAudioVolume(float *volume);
+
 #ifdef __cplusplus
 }
 #endif

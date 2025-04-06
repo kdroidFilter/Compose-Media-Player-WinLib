@@ -9,6 +9,7 @@
 #include <audioclient.h>
 #include <d3d11.h>
 #include <dxgi.h>
+#include <endpointvolume.h>
 #include <algorithm>
 #include <chrono>
 #include <thread>
@@ -56,6 +57,9 @@ static IMFDXGIDeviceManager* g_pDXGIDeviceManager = nullptr;
 static UINT32 g_dwResetToken = 0;
 
 static BOOL g_bSeekInProgress = FALSE;
+
+static IAudioEndpointVolume* g_pAudioEndpointVolume = nullptr;
+
 
 // Remplacement de GetTickCount64() par std::chrono::steady_clock
 static inline ULONGLONG GetCurrentTimeMs() {
@@ -108,11 +112,17 @@ static HRESULT InitWASAPI(const WAVEFORMATEX* pSourceFormat = nullptr) {
     HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&g_pEnumerator));
     if (FAILED(hr)) return hr;
 
+
     hr = g_pEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &g_pDevice);
     if (FAILED(hr)) return hr;
 
     hr = g_pDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&g_pAudioClient));
     if (FAILED(hr)) return hr;
+
+    hr = g_pDevice->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&g_pAudioEndpointVolume));
+    if (FAILED(hr))
+        return hr;
+
 
     WAVEFORMATEX* pwfxDevice = nullptr;
     if (!pSourceFormat) {
@@ -776,4 +786,30 @@ OFFSCREENPLAYER_API void CloseMedia() {
     g_bHasAudio = false;
     g_bAudioInitialized = false;
     g_llPlaybackStartTime = g_llTotalPauseTime = g_llPauseStart = 0;
+
+    if (g_pAudioEndpointVolume)
+    {
+        g_pAudioEndpointVolume->Release();
+        g_pAudioEndpointVolume = nullptr;
+    }
+
+}
+
+OFFSCREENPLAYER_API HRESULT SetAudioVolume(float volume)
+{
+    if (!g_pAudioEndpointVolume)
+        return OP_E_NOT_INITIALIZED; // ou une autre erreur appropriée
+
+    // volume est compris entre 0.0 (muet) et 1.0 (volume maximum)
+    HRESULT hr = g_pAudioEndpointVolume->SetMasterVolumeLevelScalar(volume, nullptr);
+    return hr;
+}
+
+OFFSCREENPLAYER_API HRESULT GetAudioVolume(float* volume)
+{
+    if (!g_pAudioEndpointVolume || !volume)
+        return OP_E_INVALID_PARAMETER;
+
+    HRESULT hr = g_pAudioEndpointVolume->GetMasterVolumeLevelScalar(volume);
+    return hr;
 }
