@@ -525,14 +525,31 @@ OFFSCREENPLAYER_API HRESULT SeekMedia(LONGLONG llPositionIn100Ns) {
     }
     PropVariantClear(&var);
 
-    // Mise à jour de la synchronisation des horloges
-    EnterCriticalSection(&g_csClockSync);
-    g_llMasterClock = llPositionIn100Ns;
-    LeaveCriticalSection(&g_csClockSync);
+    // Lecture immédiate du premier échantillon vidéo après le seek pour recalculer la synchronisation
+    IMFSample* pFirstSample = nullptr;
+    DWORD streamIndex = 0, dwFlags = 0;
+    LONGLONG llFirstTimestamp = 0;
+    hr = g_pSourceReader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &streamIndex, &dwFlags, &llFirstTimestamp, &pFirstSample);
+    if (FAILED(hr))
+        return hr;
 
-    g_llCurrentPosition = llPositionIn100Ns;
-    g_llPlaybackStartTime = GetCurrentTimeMs() - (llPositionIn100Ns / 10000);
-    g_llTotalPauseTime = 0;
+    if (pFirstSample) {
+        // Utiliser le timestamp réel du premier échantillon pour la synchronisation
+        EnterCriticalSection(&g_csClockSync);
+        g_llMasterClock = llFirstTimestamp;
+        LeaveCriticalSection(&g_csClockSync);
+        g_llCurrentPosition = llFirstTimestamp;
+        // Ajustement pour que l'image se réaffiche immédiatement après le seek
+        g_llPlaybackStartTime = GetCurrentTimeMs() - (llFirstTimestamp / 10000);
+        pFirstSample->Release();
+    } else {
+        // En l'absence d'échantillon valide, utiliser la valeur de seek
+        EnterCriticalSection(&g_csClockSync);
+        g_llMasterClock = llPositionIn100Ns;
+        LeaveCriticalSection(&g_csClockSync);
+        g_llCurrentPosition = llPositionIn100Ns;
+        g_llPlaybackStartTime = GetCurrentTimeMs() - (llPositionIn100Ns / 10000);
+    }
 
     // Réinitialiser le client audio
     if (g_pAudioClient) {
@@ -540,7 +557,7 @@ OFFSCREENPLAYER_API HRESULT SeekMedia(LONGLONG llPositionIn100Ns) {
         g_pAudioClient->Reset();
     }
 
-    // Redémarrer le thread audio si nécessaire
+    // Redémarrage du thread audio si nécessaire
     if (g_bHasAudio && g_pSourceReaderAudio) {
         g_bAudioThreadRunning = false;
         if (g_hAudioThread) {
