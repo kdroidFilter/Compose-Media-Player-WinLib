@@ -55,6 +55,8 @@ static ID3D11Device* g_pD3DDevice = nullptr;
 static IMFDXGIDeviceManager* g_pDXGIDeviceManager = nullptr;
 static UINT32 g_dwResetToken = 0;
 
+static BOOL g_bSeekInProgress = FALSE;
+
 // Remplacement de GetTickCount64() par std::chrono::steady_clock
 static inline ULONGLONG GetCurrentTimeMs() {
     return static_cast<ULONGLONG>(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -156,23 +158,48 @@ static DWORD WINAPI AudioThreadProc(LPVOID) {
     constexpr DWORD audioStreamIndex = MF_SOURCE_READER_FIRST_AUDIO_STREAM;
     UINT32 bufferFrameCount = 0;
     HRESULT hr = g_pAudioClient->GetBufferSize(&bufferFrameCount);
-    if (FAILED(hr)) return 0;
+    if (FAILED(hr))
+        return 0;
 
     while (g_bAudioThreadRunning) {
-        if (g_llPauseStart != 0) { PreciseSleepHighRes(10); continue; }
+        // Vérifier si une opération de seek est en cours ou si le son est en pause
+        bool seekInProgress = false;
+        EnterCriticalSection(&g_csClockSync);
+        seekInProgress = g_bSeekInProgress;
+        LeaveCriticalSection(&g_csClockSync);
+        if (seekInProgress || g_llPauseStart != 0) {
+            PreciseSleepHighRes(10);
+            continue;
+        }
 
         IMFSample* pSample = nullptr;
         DWORD dwFlags = 0;
         LONGLONG llTimeStamp = 0;
         hr = g_pSourceReaderAudio->ReadSample(audioStreamIndex, 0, nullptr, &dwFlags, &llTimeStamp, &pSample);
-        if (FAILED(hr)) break;
+        if (FAILED(hr))
+            break;
+
+        // Vérification additionnelle du seek après ReadSample
+        EnterCriticalSection(&g_csClockSync);
+        seekInProgress = g_bSeekInProgress;
+        LeaveCriticalSection(&g_csClockSync);
+        if (seekInProgress) {
+            if (pSample)
+                pSample->Release();
+            PreciseSleepHighRes(10);
+            continue;
+        }
 
         if (dwFlags & MF_SOURCE_READERF_ENDOFSTREAM) {
-            if (pSample) pSample->Release();
+            if (pSample)
+                pSample->Release();
             break;
         }
 
-        if (!pSample) { PreciseSleepHighRes(1); continue; }
+        if (!pSample) {
+            PreciseSleepHighRes(1);
+            continue;
+        }
 
         if (llTimeStamp > 0 && g_llPlaybackStartTime > 0) {
             auto sampleTimeMs = static_cast<ULONGLONG>(llTimeStamp / 10000);
@@ -182,23 +209,38 @@ static DWORD WINAPI AudioThreadProc(LPVOID) {
             if (abs(diff) > 30) {
                 if (diff > 30)
                     PreciseSleepHighRes(diff);
-                else { pSample->Release(); continue; }
+                else {
+                    pSample->Release();
+                    continue;
+                }
             } else if (diff > 0)
                 PreciseSleepHighRes(diff);
         }
 
         IMFMediaBuffer* pBuf = nullptr;
         hr = pSample->ConvertToContiguousBuffer(&pBuf);
-        if (FAILED(hr) || !pBuf) { pSample->Release(); continue; }
+        if (FAILED(hr) || !pBuf) {
+            pSample->Release();
+            continue;
+        }
 
         BYTE* pAudioData = nullptr;
         DWORD cbMax = 0, cbCurr = 0;
         hr = pBuf->Lock(&pAudioData, &cbMax, &cbCurr);
-        if (FAILED(hr)) { pBuf->Release(); pSample->Release(); continue; }
+        if (FAILED(hr)) {
+            pBuf->Release();
+            pSample->Release();
+            continue;
+        }
 
         UINT32 numFramesPadding = 0;
         hr = g_pAudioClient->GetCurrentPadding(&numFramesPadding);
-        if (FAILED(hr)) { pBuf->Unlock(); pBuf->Release(); pSample->Release(); continue; }
+        if (FAILED(hr)) {
+            pBuf->Unlock();
+            pBuf->Release();
+            pSample->Release();
+            continue;
+        }
 
         UINT32 bufferFramesAvailable = bufferFrameCount - numFramesPadding;
         UINT32 blockAlign = g_pSourceAudioFormat ? g_pSourceAudioFormat->nBlockAlign : 4;
@@ -525,110 +567,92 @@ OFFSCREENPLAYER_API HRESULT GetVideoFrameRate(UINT* pNum, UINT* pDenom) {
 }
 
 OFFSCREENPLAYER_API HRESULT SeekMedia(LONGLONG llPositionIn100Ns) {
-    if (!g_pSourceReader)
+    if (!g_bMFInitialized || !g_pSourceReader)
         return OP_E_NOT_INITIALIZED;
 
-    // Sauvegarder l'état de lecture et mettre en pause si nécessaire
-    BOOL wasPlaying = (g_llPauseStart == 0 && g_llPlaybackStartTime > 0);
-    if (wasPlaying)
-        SetPlaybackState(FALSE);
-
-    // Déverrouiller le frame en cours
-    UnlockVideoFrame();
-
-    // Vider les buffers des flux vidéo et audio
-    g_pSourceReader->Flush(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
-    if (g_pSourceReaderAudio)
-        g_pSourceReaderAudio->Flush(MF_SOURCE_READER_FIRST_AUDIO_STREAM);
-
-    // Positionner la lecture pour le flux vidéo
-    PROPVARIANT varSeek;
-    PropVariantInit(&varSeek);
-    varSeek.vt = VT_I8;
-    varSeek.hVal.QuadPart = llPositionIn100Ns;
-    HRESULT hr = g_pSourceReader->SetCurrentPosition(GUID_NULL, varSeek);
-    PropVariantClear(&varSeek);
-    if (FAILED(hr))
-        return hr;
-
-    // Positionner la lecture pour le flux audio, si présent
-    if (g_pSourceReaderAudio) {
-        PROPVARIANT varAudio;
-        PropVariantInit(&varAudio);
-        varAudio.vt = VT_I8;
-        varAudio.hVal.QuadPart = llPositionIn100Ns;
-        hr = g_pSourceReaderAudio->SetCurrentPosition(GUID_NULL, varAudio);
-        PropVariantClear(&varAudio);
-        // Même en cas d'échec, on continue pour la vidéo
-    }
-
-    // Arrêter et réinitialiser le thread audio avec un timeout réduit
-    g_bAudioThreadRunning = false;
-    if (g_hAudioThread) {
-        SetEvent(g_hAudioSamplesReadyEvent);
-        WaitForSingleObject(g_hAudioThread, 1000); // timeout réduit à 1000 ms
-        CloseHandle(g_hAudioThread);
-        g_hAudioThread = nullptr;
-    }
-
-    if (g_pAudioClient) {
-        g_pAudioClient->Stop();
-        g_pAudioClient->Reset();
-    }
-
-    // Réinitialiser le tampon audio si nécessaire
-    if (g_pRenderClient) {
-        UINT32 padding = 0, bufferSize = 0;
-        g_pAudioClient->GetCurrentPadding(&padding);
-        g_pAudioClient->GetBufferSize(&bufferSize);
-        if (padding > 0 && bufferSize > 0) {
-            BYTE* pTemp = nullptr;
-            if (SUCCEEDED(g_pRenderClient->GetBuffer(padding, &pTemp)))
-                g_pRenderClient->ReleaseBuffer(padding, AUDCLNT_BUFFERFLAGS_SILENT);
-        }
-    }
-
-    // Récupérer le premier échantillon vidéo après le seek
-    IMFSample* pSample = nullptr;
-    DWORD dwFlags = 0, streamIndex = 0;
-    LONGLONG llFirstTimestamp = 0;
-    hr = g_pSourceReader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &streamIndex, &dwFlags, &llFirstTimestamp, &pSample);
-    if (FAILED(hr))
-        return hr;
-
-    if (pSample) {
-        pSample->Release();
-        g_llCurrentPosition = llFirstTimestamp;
-    } else {
-        g_llCurrentPosition = llPositionIn100Ns;
-        llFirstTimestamp = llPositionIn100Ns;
-    }
-
-    // Mise à jour de l'horloge maître et des temps de lecture
+    // Set seek in progress flag with proper synchronization
     EnterCriticalSection(&g_csClockSync);
-    g_llMasterClock = llFirstTimestamp;
+    g_bSeekInProgress = TRUE;
     LeaveCriticalSection(&g_csClockSync);
 
-    g_llPlaybackStartTime = GetCurrentTimeMs() - (llFirstTimestamp / 10000);
-    g_llTotalPauseTime = 0;
+    if (g_llPauseStart != 0) {
+        // If paused, update total pause time before seeking
+        g_llTotalPauseTime += (GetCurrentTimeMs() - g_llPauseStart);
+        g_llPauseStart = GetCurrentTimeMs(); // Reset pause start time
+    }
 
-    // Relancer le thread audio si un flux audio est présent et initialisé
-    if (g_bHasAudio && g_bAudioInitialized && g_pSourceReaderAudio) {
-        g_bAudioThreadRunning = true;
-        g_hAudioThread = CreateThread(nullptr, 0, AudioThreadProc, nullptr, 0, nullptr);
-        if (!g_hAudioThread) {
-            g_bAudioThreadRunning = false;
-            PrintHR("CreateThread(audio) failed", HRESULT_FROM_WIN32(GetLastError()));
-        } else if (g_hAudioReadyEvent) {
-            SetEvent(g_hAudioReadyEvent);
+    // Unlock any locked video frame
+    if (g_pLockedBuffer)
+        UnlockVideoFrame();
+
+    PROPVARIANT var;
+    PropVariantInit(&var);
+    var.vt = VT_I8;
+    var.hVal.QuadPart = llPositionIn100Ns;
+
+    // Stop audio rendering if active
+    bool wasPlaying = false;
+    if (g_bHasAudio && g_pAudioClient) {
+        wasPlaying = (g_llPauseStart == 0);
+        g_pAudioClient->Stop();
+
+        // Add small delay to ensure audio processing has paused
+        Sleep(5);
+    }
+
+    // Seek video stream
+    HRESULT hr = g_pSourceReader->SetCurrentPosition(GUID_NULL, var);
+    if (FAILED(hr)) {
+        EnterCriticalSection(&g_csClockSync);
+        g_bSeekInProgress = FALSE;
+        LeaveCriticalSection(&g_csClockSync);
+        PropVariantClear(&var);
+        return hr;
+    }
+
+    // Seek audio stream if available
+    if (g_bHasAudio && g_pSourceReaderAudio) {
+        hr = g_pSourceReaderAudio->SetCurrentPosition(GUID_NULL, var);
+        if (FAILED(hr)) {
+            PrintHR("Failed to seek audio stream", hr);
+            // Continue anyway, just log the error
+        }
+
+        // Clear audio buffers
+        if (g_pRenderClient && g_pAudioClient) {
+            UINT32 bufferFrameCount = 0;
+            if (SUCCEEDED(g_pAudioClient->GetBufferSize(&bufferFrameCount))) {
+                g_pAudioClient->Reset();
+            }
         }
     }
 
+    PropVariantClear(&var);
+
+    // Reset timing information
+    EnterCriticalSection(&g_csClockSync);
+    g_llMasterClock = llPositionIn100Ns;
+    g_llCurrentPosition = llPositionIn100Ns;
+    g_bSeekInProgress = FALSE;
+    LeaveCriticalSection(&g_csClockSync);
+
+    // Reset EOF flag as we may have seeked away from the end
     g_bEOF = FALSE;
 
-    // Reprendre la lecture si elle était active avant le seek
-    if (wasPlaying)
-        SetPlaybackState(TRUE);
+    // Adjust playback start time to maintain correct timing after seek
+    ULONGLONG currentTime = GetCurrentTimeMs();
+    g_llPlaybackStartTime = currentTime - static_cast<ULONGLONG>(llPositionIn100Ns / 10000);
+
+    // Restart audio if it was playing before
+    if (g_bHasAudio && g_pAudioClient && wasPlaying) {
+        // Add small delay to ensure seeking has completed
+        Sleep(5);
+        g_pAudioClient->Start();
+    }
+
+    // Notify audio thread that we've performed a seek operation
+    if (g_hAudioReadyEvent)
+        SetEvent(g_hAudioReadyEvent);
 
     return S_OK;
 }
