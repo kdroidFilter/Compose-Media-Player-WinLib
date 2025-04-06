@@ -8,7 +8,6 @@
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <d3d11.h>
-#include <d3d11_1.h>
 #include <dxgi.h>
 #include <algorithm>
 using std::min;
@@ -106,48 +105,42 @@ static HRESULT InitWASAPI(const WAVEFORMATEX* pSourceFormat = nullptr) {
     }
 
     HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&g_pEnumerator));
-    if (FAILED(hr)) { PrintHR("CoCreateInstance(MMDeviceEnumerator) failed", hr); return hr; }
+    if (FAILED(hr)) return hr;
 
     hr = g_pEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &g_pDevice);
-    if (FAILED(hr)) { PrintHR("GetDefaultAudioEndpoint failed", hr); return hr; }
+    if (FAILED(hr)) return hr;
 
     hr = g_pDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&g_pAudioClient));
-    if (FAILED(hr)) { PrintHR("Device->Activate(IAudioClient) failed", hr); return hr; }
+    if (FAILED(hr)) return hr;
 
     WAVEFORMATEX* pwfxDevice = nullptr;
     if (!pSourceFormat) {
         hr = g_pAudioClient->GetMixFormat(&pwfxDevice);
-        if (FAILED(hr)) { PrintHR("GetMixFormat failed", hr); return hr; }
+        if (FAILED(hr)) return hr;
         pSourceFormat = pwfxDevice;
     }
 
     if (!g_hAudioSamplesReadyEvent) {
         g_hAudioSamplesReadyEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-        if (!g_hAudioSamplesReadyEvent) {
-            hr = HRESULT_FROM_WIN32(GetLastError());
-            PrintHR("CreateEvent (audio samples) failed", hr);
-            return hr;
-        }
+        if (!g_hAudioSamplesReadyEvent) return HRESULT_FROM_WIN32(GetLastError());
     }
 
-    REFERENCE_TIME hnsBufferDuration = 2000000; // 200 ms
+    REFERENCE_TIME hnsBufferDuration = 2000000;
     hr = g_pAudioClient->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
                                     hnsBufferDuration, 0, pSourceFormat, nullptr);
     if (FAILED(hr)) {
         if (pwfxDevice) CoTaskMemFree(pwfxDevice);
-        PrintHR("AudioClient->Initialize failed", hr);
         return hr;
     }
 
     hr = g_pAudioClient->SetEventHandle(g_hAudioSamplesReadyEvent);
     if (FAILED(hr)) {
         if (pwfxDevice) CoTaskMemFree(pwfxDevice);
-        PrintHR("SetEventHandle failed", hr);
         return hr;
     }
 
     hr = g_pAudioClient->GetService(__uuidof(IAudioRenderClient), reinterpret_cast<void**>(&g_pRenderClient));
-    if (FAILED(hr)) { PrintHR("GetService(IAudioRenderClient) failed", hr); return hr; }
+    if (FAILED(hr)) return hr;
 
     g_bAudioInitialized = true;
     if (pwfxDevice) CoTaskMemFree(pwfxDevice);
@@ -164,7 +157,7 @@ static DWORD WINAPI AudioThreadProc(LPVOID) {
     constexpr DWORD audioStreamIndex = MF_SOURCE_READER_FIRST_AUDIO_STREAM;
     UINT32 bufferFrameCount = 0;
     HRESULT hr = g_pAudioClient->GetBufferSize(&bufferFrameCount);
-    if (FAILED(hr)) { PrintHR("GetBufferSize failed", hr); return 0; }
+    if (FAILED(hr)) return 0;
 
     while (g_bAudioThreadRunning) {
         if (g_llPauseStart != 0) { PreciseSleepHighRes(10); continue; }
@@ -173,7 +166,7 @@ static DWORD WINAPI AudioThreadProc(LPVOID) {
         DWORD dwFlags = 0;
         LONGLONG llTimeStamp = 0;
         hr = g_pSourceReaderAudio->ReadSample(audioStreamIndex, 0, nullptr, &dwFlags, &llTimeStamp, &pSample);
-        if (FAILED(hr)) { PrintHR("ReadSample(audio) failed", hr); break; }
+        if (FAILED(hr)) break;
 
         if (dwFlags & MF_SOURCE_READERF_ENDOFSTREAM) {
             if (pSample) pSample->Release();
@@ -226,8 +219,6 @@ static DWORD WINAPI AudioThreadProc(LPVOID) {
                 DWORD bytesToCopy = framesToWrite * blockAlign;
                 memcpy(pDataRender, pAudioData, bytesToCopy);
                 g_pRenderClient->ReleaseBuffer(framesToWrite, 0);
-            } else {
-                PrintHR("GetBuffer failed", hr);
             }
         }
 
@@ -538,25 +529,30 @@ OFFSCREENPLAYER_API HRESULT SeekMedia(LONGLONG llPositionIn100Ns) {
     if (!g_pSourceReader)
         return OP_E_NOT_INITIALIZED;
 
+    // Sauvegarder l'état de lecture et mettre en pause si nécessaire
     BOOL wasPlaying = (g_llPauseStart == 0 && g_llPlaybackStartTime > 0);
     if (wasPlaying)
         SetPlaybackState(FALSE);
 
+    // Déverrouiller le frame en cours
     UnlockVideoFrame();
 
+    // Vider les buffers des flux vidéo et audio
     g_pSourceReader->Flush(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
     if (g_pSourceReaderAudio)
         g_pSourceReaderAudio->Flush(MF_SOURCE_READER_FIRST_AUDIO_STREAM);
 
+    // Positionner la lecture pour le flux vidéo
     PROPVARIANT varSeek;
     PropVariantInit(&varSeek);
     varSeek.vt = VT_I8;
     varSeek.hVal.QuadPart = llPositionIn100Ns;
     HRESULT hr = g_pSourceReader->SetCurrentPosition(GUID_NULL, varSeek);
-    if (FAILED(hr)) {
-        PropVariantClear(&varSeek);
+    PropVariantClear(&varSeek);
+    if (FAILED(hr))
         return hr;
-    }
+
+    // Positionner la lecture pour le flux audio, si présent
     if (g_pSourceReaderAudio) {
         PROPVARIANT varAudio;
         PropVariantInit(&varAudio);
@@ -564,13 +560,14 @@ OFFSCREENPLAYER_API HRESULT SeekMedia(LONGLONG llPositionIn100Ns) {
         varAudio.hVal.QuadPart = llPositionIn100Ns;
         hr = g_pSourceReaderAudio->SetCurrentPosition(GUID_NULL, varAudio);
         PropVariantClear(&varAudio);
+        // Même en cas d'échec, on continue pour la vidéo
     }
-    PropVariantClear(&varSeek);
 
+    // Arrêter et réinitialiser le thread audio avec un timeout réduit
     g_bAudioThreadRunning = false;
     if (g_hAudioThread) {
         SetEvent(g_hAudioSamplesReadyEvent);
-        WaitForSingleObject(g_hAudioThread, 3000);
+        WaitForSingleObject(g_hAudioThread, 1000); // timeout réduit à 1000 ms
         CloseHandle(g_hAudioThread);
         g_hAudioThread = nullptr;
     }
@@ -580,6 +577,7 @@ OFFSCREENPLAYER_API HRESULT SeekMedia(LONGLONG llPositionIn100Ns) {
         g_pAudioClient->Reset();
     }
 
+    // Réinitialiser le tampon audio si nécessaire
     if (g_pRenderClient) {
         UINT32 padding = 0, bufferSize = 0;
         g_pAudioClient->GetCurrentPadding(&padding);
@@ -591,11 +589,13 @@ OFFSCREENPLAYER_API HRESULT SeekMedia(LONGLONG llPositionIn100Ns) {
         }
     }
 
+    // Récupérer le premier échantillon vidéo après le seek
     IMFSample* pSample = nullptr;
     DWORD dwFlags = 0, streamIndex = 0;
     LONGLONG llFirstTimestamp = 0;
     hr = g_pSourceReader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &streamIndex, &dwFlags, &llFirstTimestamp, &pSample);
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr))
+        return hr;
 
     if (pSample) {
         pSample->Release();
@@ -605,6 +605,7 @@ OFFSCREENPLAYER_API HRESULT SeekMedia(LONGLONG llPositionIn100Ns) {
         llFirstTimestamp = llPositionIn100Ns;
     }
 
+    // Mise à jour de l'horloge maître et des temps de lecture
     EnterCriticalSection(&g_csClockSync);
     g_llMasterClock = llFirstTimestamp;
     LeaveCriticalSection(&g_csClockSync);
@@ -612,6 +613,7 @@ OFFSCREENPLAYER_API HRESULT SeekMedia(LONGLONG llPositionIn100Ns) {
     g_llPlaybackStartTime = GetCurrentTimeMs() - (llFirstTimestamp / 10000);
     g_llTotalPauseTime = 0;
 
+    // Relancer le thread audio si un flux audio est présent et initialisé
     if (g_bHasAudio && g_bAudioInitialized && g_pSourceReaderAudio) {
         g_bAudioThreadRunning = true;
         g_hAudioThread = CreateThread(nullptr, 0, AudioThreadProc, nullptr, 0, nullptr);
@@ -625,6 +627,7 @@ OFFSCREENPLAYER_API HRESULT SeekMedia(LONGLONG llPositionIn100Ns) {
 
     g_bEOF = FALSE;
 
+    // Reprendre la lecture si elle était active avant le seek
     if (wasPlaying)
         SetPlaybackState(TRUE);
 
