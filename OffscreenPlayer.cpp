@@ -10,6 +10,8 @@
 #include <d3d11.h>
 #include <dxgi.h>
 #include <algorithm>
+#include <chrono>
+#include <thread>
 using std::min;
 
 #ifdef _DEBUG
@@ -53,8 +55,29 @@ static ID3D11Device* g_pD3DDevice = nullptr;
 static IMFDXGIDeviceManager* g_pDXGIDeviceManager = nullptr;
 static UINT32 g_dwResetToken = 0;
 
+// Remplacement de GetTickCount64() par std::chrono::steady_clock
 static inline ULONGLONG GetCurrentTimeMs() {
-    return GetTickCount64();
+    return static_cast<ULONGLONG>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+// Implémentation modernisée de PreciseSleepHighRes avec std::chrono
+static void PreciseSleepHighRes(double ms) {
+    if (ms <= 0.1)
+        return;
+
+    using clock = std::chrono::steady_clock;
+    if (ms < 5.0) {
+        auto target = clock::now() + std::chrono::duration<double, std::milli>(ms);
+        while (clock::now() < target)
+            std::this_thread::yield();
+    } else {
+        double sleepPortion = ms * 0.8;
+        std::this_thread::sleep_for(std::chrono::duration<double, std::milli>(sleepPortion));
+        auto target = clock::now() + std::chrono::duration<double, std::milli>(ms - sleepPortion);
+        while (clock::now() < target)
+            std::this_thread::yield();
+    }
 }
 
 static HRESULT CreateDX11Device() {
@@ -70,32 +93,6 @@ static HRESULT CreateDX11Device() {
         pMultithread->Release();
     }
     return hr;
-}
-
-static void PreciseSleepHighRes(double ms) {
-    if (ms <= 0.1) return;
-
-    LARGE_INTEGER freq, start, end;
-    QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&start);
-
-    if (ms < 5.0) {
-        double target = ms * freq.QuadPart / 1000.0;
-        do {
-            QueryPerformanceCounter(&end);
-            YieldProcessor();
-        } while ((end.QuadPart - start.QuadPart) < target);
-    } else {
-        double sleepPortion = ms * 0.8;
-        Sleep(static_cast<DWORD>(sleepPortion));
-        QueryPerformanceCounter(&start);
-        double remaining = ms - sleepPortion;
-        double target = remaining * freq.QuadPart / 1000.0;
-        do {
-            QueryPerformanceCounter(&end);
-            YieldProcessor();
-        } while ((end.QuadPart - start.QuadPart) < target);
-    }
 }
 
 static HRESULT InitWASAPI(const WAVEFORMATEX* pSourceFormat = nullptr) {
