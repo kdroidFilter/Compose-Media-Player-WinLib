@@ -1,21 +1,21 @@
 cmake_minimum_required(VERSION 3.15)
-project(OffscreenPlayer LANGUAGES CXX)
+project(NativeVideoPlayer LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 
-add_library(OffscreenPlayer SHARED
-        OffscreenPlayer.cpp
-        OffscreenPlayer.h
+add_library(NativeVideoPlayer SHARED
+        NativeVideoPlayer.cpp
+        NativeVideoPlayer.h
 )
 
-target_compile_definitions(OffscreenPlayer PRIVATE
+target_compile_definitions(NativeVideoPlayer PRIVATE
         WIN32_LEAN_AND_MEAN
         NOMINMAX
-        OFFSCREENPLAYER_EXPORTS
+        NATIVEVIDEOPLAYER_EXPORTS
 )
 
 # Link with Media Foundation and WASAPI - adding mfsensorgroup and dxva2 for additional codec support
-target_link_libraries(OffscreenPlayer PRIVATE
+target_link_libraries(NativeVideoPlayer PRIVATE
         mf
         mfplat
         mfreadwrite

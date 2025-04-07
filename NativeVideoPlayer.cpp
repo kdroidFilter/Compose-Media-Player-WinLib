@@ -1,4 +1,4 @@
-#include "OffscreenPlayer.h"
+#include "NativeVideoPlayer.h"
 #include <cstdio>
 #include <cstring>
 #include <windows.h>
@@ -291,7 +291,7 @@ static DWORD WINAPI AudioThreadProc(LPVOID) {
     return 0;
 }
 
-OFFSCREENPLAYER_API HRESULT InitMediaFoundation() {
+NATIVEVIDEOPLAYER_API HRESULT InitMediaFoundation() {
     if (g_bMFInitialized)
         return OP_E_ALREADY_INITIALIZED;
 
@@ -325,7 +325,7 @@ OFFSCREENPLAYER_API HRESULT InitMediaFoundation() {
     return S_OK;
 }
 
-OFFSCREENPLAYER_API HRESULT OpenMedia(const wchar_t* url) {
+NATIVEVIDEOPLAYER_API HRESULT OpenMedia(const wchar_t* url) {
     if (!g_bMFInitialized)
         return OP_E_NOT_INITIALIZED;
     if (!url)
@@ -450,7 +450,7 @@ OFFSCREENPLAYER_API HRESULT OpenMedia(const wchar_t* url) {
     return S_OK;
 }
 
-OFFSCREENPLAYER_API HRESULT ReadVideoFrame(BYTE** pData, DWORD* pDataSize) {
+NATIVEVIDEOPLAYER_API HRESULT ReadVideoFrame(BYTE** pData, DWORD* pDataSize) {
     if (!g_pSourceReader || !pData || !pDataSize)
         return OP_E_NOT_INITIALIZED;
 
@@ -544,7 +544,7 @@ OFFSCREENPLAYER_API HRESULT ReadVideoFrame(BYTE** pData, DWORD* pDataSize) {
     return S_OK;
 }
 
-OFFSCREENPLAYER_API HRESULT UnlockVideoFrame() {
+NATIVEVIDEOPLAYER_API HRESULT UnlockVideoFrame() {
     if (g_pLockedBuffer) {
         g_pLockedBuffer->Unlock();
         g_pLockedBuffer->Release();
@@ -555,16 +555,16 @@ OFFSCREENPLAYER_API HRESULT UnlockVideoFrame() {
     return S_OK;
 }
 
-OFFSCREENPLAYER_API BOOL IsEOF() {
+NATIVEVIDEOPLAYER_API BOOL IsEOF() {
     return g_bEOF;
 }
 
-OFFSCREENPLAYER_API void GetVideoSize(UINT32* pWidth, UINT32* pHeight) {
+NATIVEVIDEOPLAYER_API void GetVideoSize(UINT32* pWidth, UINT32* pHeight) {
     if (pWidth)  *pWidth = g_videoWidth;
     if (pHeight) *pHeight = g_videoHeight;
 }
 
-OFFSCREENPLAYER_API HRESULT GetVideoFrameRate(UINT* pNum, UINT* pDenom) {
+NATIVEVIDEOPLAYER_API HRESULT GetVideoFrameRate(UINT* pNum, UINT* pDenom) {
     if (!g_pSourceReader || !pNum || !pDenom)
         return OP_E_NOT_INITIALIZED;
 
@@ -577,7 +577,7 @@ OFFSCREENPLAYER_API HRESULT GetVideoFrameRate(UINT* pNum, UINT* pDenom) {
     return hr;
 }
 
-OFFSCREENPLAYER_API HRESULT SeekMedia(LONGLONG llPositionIn100Ns) {
+NATIVEVIDEOPLAYER_API HRESULT SeekMedia(LONGLONG llPositionIn100Ns) {
     if (!g_bMFInitialized || !g_pSourceReader)
         return OP_E_NOT_INITIALIZED;
 
@@ -668,7 +668,7 @@ OFFSCREENPLAYER_API HRESULT SeekMedia(LONGLONG llPositionIn100Ns) {
     return S_OK;
 }
 
-OFFSCREENPLAYER_API HRESULT GetMediaDuration(LONGLONG* pDuration) {
+NATIVEVIDEOPLAYER_API HRESULT GetMediaDuration(LONGLONG* pDuration) {
     if (!g_pSourceReader || !pDuration)
         return OP_E_NOT_INITIALIZED;
 
@@ -686,7 +686,7 @@ OFFSCREENPLAYER_API HRESULT GetMediaDuration(LONGLONG* pDuration) {
     return hr;
 }
 
-OFFSCREENPLAYER_API HRESULT GetMediaPosition(LONGLONG* pPosition) {
+NATIVEVIDEOPLAYER_API HRESULT GetMediaPosition(LONGLONG* pPosition) {
     if (!g_pSourceReader || !pPosition)
         return OP_E_NOT_INITIALIZED;
 
@@ -694,7 +694,7 @@ OFFSCREENPLAYER_API HRESULT GetMediaPosition(LONGLONG* pPosition) {
     return S_OK;
 }
 
-OFFSCREENPLAYER_API HRESULT SetPlaybackState(BOOL bPlaying) {
+NATIVEVIDEOPLAYER_API HRESULT SetPlaybackState(BOOL bPlaying) {
     if (!g_bMFInitialized)
         return OP_E_NOT_INITIALIZED;
 
@@ -716,7 +716,7 @@ OFFSCREENPLAYER_API HRESULT SetPlaybackState(BOOL bPlaying) {
     return S_OK;
 }
 
-OFFSCREENPLAYER_API HRESULT ShutdownMediaFoundation() {
+NATIVEVIDEOPLAYER_API HRESULT ShutdownMediaFoundation() {
     CloseMedia();
     HRESULT hr = S_OK;
     if (g_bMFInitialized) {
@@ -736,7 +736,7 @@ OFFSCREENPLAYER_API HRESULT ShutdownMediaFoundation() {
     return hr;
 }
 
-OFFSCREENPLAYER_API void CloseMedia() {
+NATIVEVIDEOPLAYER_API void CloseMedia() {
     g_bAudioThreadRunning = false;
     if (g_hAudioThread) {
         WaitForSingleObject(g_hAudioThread, 5000);
@@ -796,7 +796,7 @@ OFFSCREENPLAYER_API void CloseMedia() {
 
 }
 
-OFFSCREENPLAYER_API HRESULT SetAudioVolume(float volume)
+NATIVEVIDEOPLAYER_API HRESULT SetAudioVolume(float volume)
 {
     if (!g_pAudioEndpointVolume)
         return OP_E_NOT_INITIALIZED; // ou une autre erreur appropriée
@@ -806,7 +806,7 @@ OFFSCREENPLAYER_API HRESULT SetAudioVolume(float volume)
     return hr;
 }
 
-OFFSCREENPLAYER_API HRESULT GetAudioVolume(float* volume)
+NATIVEVIDEOPLAYER_API HRESULT GetAudioVolume(float* volume)
 {
     if (!g_pAudioEndpointVolume || !volume)
         return OP_E_INVALID_PARAMETER;
@@ -815,7 +815,7 @@ OFFSCREENPLAYER_API HRESULT GetAudioVolume(float* volume)
     return hr;
 }
 
-OFFSCREENPLAYER_API HRESULT GetAudioLevels(float* pLeftLevel, float* pRightLevel) {
+NATIVEVIDEOPLAYER_API HRESULT GetAudioLevels(float* pLeftLevel, float* pRightLevel) {
     if (!pLeftLevel || !pRightLevel)
         return OP_E_INVALID_PARAMETER;
 
