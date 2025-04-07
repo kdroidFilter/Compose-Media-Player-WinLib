@@ -1,31 +1,31 @@
-cmake_minimum_required(VERSION 3.29)
-project(NativeVideoPlayer)
+cmake_minimum_required(VERSION 3.15)
+project(NativeVideoPlayer LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 17)
 
-# Creating the DLL
 add_library(NativeVideoPlayer SHARED
         NativeVideoPlayer.cpp
         NativeVideoPlayer.h
 )
 
-# Link with necessary Media Foundation libraries
-target_link_libraries(NativeVideoPlayer PRIVATE
-        mfplay
-        mf
-        mfplat
-        mfuuid
-        shlwapi
-        strmiids
-        ole32
-        oleaut32
+target_compile_definitions(NativeVideoPlayer PRIVATE
+        WIN32_LEAN_AND_MEAN
+        NOMINMAX
+        NATIVEVIDEOPLAYER_EXPORTS
 )
 
-target_compile_definitions(NativeVideoPlayer PRIVATE
-        WINVER=_WIN32_WINNT_WIN10
-        _WIN32_WINNT=0x0A00
-        WIN32
-        UNICODE
-        _UNICODE
-        MEDIAPLAYER_EXPORTS
+# Link with Media Foundation and WASAPI - adding mfsensorgroup and dxva2 for additional codec support
+target_link_libraries(NativeVideoPlayer PRIVATE
+        mf
+        mfplat
+        mfreadwrite
+        mfuuid
+        wmcodecdspuuid
+        ole32
+        oleaut32
+        avrt
+        mfsensorgroup  # For additional codec support
+        dxva2         # For H.264 hardware decoding
+        d3d11     # Added D3D11 library
+        dxgi
 )
