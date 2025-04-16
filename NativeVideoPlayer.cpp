@@ -341,6 +341,7 @@ NATIVEVIDEOPLAYER_API void DestroyVideoPlayerInstance(VideoPlayerInstance* pInst
         CloseMedia(pInstance);
         if (pInstance->hAudioReadyEvent) {
             CloseHandle(pInstance->hAudioReadyEvent);
+            pInstance->hAudioReadyEvent = nullptr;
         }
         DeleteCriticalSection(&pInstance->csClockSync);
         delete pInstance;
@@ -763,8 +764,9 @@ NATIVEVIDEOPLAYER_API void CloseMedia(VideoPlayerInstance* pInstance) {
         CloseHandle(pInstance->hAudioThread);
         pInstance->hAudioThread = nullptr;
     }
-    if (pInstance->pLockedBuffer)
+    if (pInstance->pLockedBuffer) {
         UnlockVideoFrame(pInstance);
+    }
     if (pInstance->pAudioClient) {
         pInstance->pAudioClient->Stop();
         pInstance->pAudioClient->Release();
@@ -832,7 +834,12 @@ NATIVEVIDEOPLAYER_API HRESULT GetAudioLevels(VideoPlayerInstance* pInstance, flo
 
     float peaks[2] = { 0.0f, 0.0f };
     hr = pAudioMeterInfo->GetChannelsPeakValues(2, peaks);
-    pAudioMeterInfo->Release();
+    
+    if (pAudioMeterInfo) {
+        pAudioMeterInfo->Release();
+        pAudioMeterInfo = nullptr;
+    }
+    
     if (FAILED(hr))
         return hr;
 
