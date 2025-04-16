@@ -59,6 +59,7 @@ struct VideoPlayerInstance {
     CRITICAL_SECTION csClockSync;
     BOOL bSeekInProgress = FALSE;
     IAudioEndpointVolume* pAudioEndpointVolume = nullptr;
+    float instanceVolume = 1.0f; // Volume spécifique à cette instance (1.0 = 100%)
 };
 
 // Fonctions utilitaires
@@ -259,7 +260,26 @@ static DWORD WINAPI AudioThreadProc(LPVOID lpParam) {
             hr = pInstance->pRenderClient->GetBuffer(framesToWrite, &pDataRender);
             if (SUCCEEDED(hr) && pDataRender) {
                 DWORD bytesToCopy = framesToWrite * blockAlign;
-                memcpy(pDataRender, pAudioData, bytesToCopy);
+                
+                // Si le volume de l'instance n'est pas à 100%, appliquer le volume aux données audio
+                if (pInstance->instanceVolume < 0.999f) {
+                    // Créer une copie temporaire des données audio
+                    memcpy(pDataRender, pAudioData, bytesToCopy);
+                    
+                    // Appliquer le volume pour les échantillons audio 16 bits stéréo (format PCM typique)
+                    if (pInstance->pSourceAudioFormat && pInstance->pSourceAudioFormat->wBitsPerSample == 16) {
+                        int16_t* pSamples = reinterpret_cast<int16_t*>(pDataRender);
+                        for (UINT32 i = 0; i < bytesToCopy / sizeof(int16_t); i++) {
+                            // Appliquer le volume à chaque échantillon
+                            float sample = static_cast<float>(pSamples[i]);
+                            pSamples[i] = static_cast<int16_t>(sample * pInstance->instanceVolume);
+                        }
+                    }
+                } else {
+                    // Volume à 100%, copie directe
+                    memcpy(pDataRender, pAudioData, bytesToCopy);
+                }
+                
                 pInstance->pRenderClient->ReleaseBuffer(framesToWrite, 0);
             }
         }
@@ -808,19 +828,27 @@ NATIVEVIDEOPLAYER_API void CloseMedia(VideoPlayerInstance* pInstance) {
 }
 
 NATIVEVIDEOPLAYER_API HRESULT SetAudioVolume(VideoPlayerInstance* pInstance, float volume) {
-    if (!pInstance || !pInstance->pAudioEndpointVolume)
+    if (!pInstance)
         return OP_E_NOT_INITIALIZED;
 
-    HRESULT hr = pInstance->pAudioEndpointVolume->SetMasterVolumeLevelScalar(volume, nullptr);
-    return hr;
+    // Limiter le volume entre 0.0 et 1.0
+    if (volume < 0.0f) volume = 0.0f;
+    if (volume > 1.0f) volume = 1.0f;
+    
+    // Stocker le volume dans l'instance
+    pInstance->instanceVolume = volume;
+    
+    return S_OK;
 }
 
 NATIVEVIDEOPLAYER_API HRESULT GetAudioVolume(VideoPlayerInstance* pInstance, float* volume) {
-    if (!pInstance || !pInstance->pAudioEndpointVolume || !volume)
+    if (!pInstance || !volume)
         return OP_E_INVALID_PARAMETER;
 
-    HRESULT hr = pInstance->pAudioEndpointVolume->GetMasterVolumeLevelScalar(volume);
-    return hr;
+    // Retourner le volume spécifique à l'instance
+    *volume = pInstance->instanceVolume;
+    
+    return S_OK;
 }
 
 NATIVEVIDEOPLAYER_API HRESULT GetAudioLevels(VideoPlayerInstance* pInstance, float* pLeftLevel, float* pRightLevel) {
