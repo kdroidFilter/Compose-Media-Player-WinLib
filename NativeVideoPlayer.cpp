@@ -384,12 +384,13 @@ NATIVEVIDEOPLAYER_API HRESULT CreateVideoPlayerInstance(VideoPlayerInstance** pp
 
 NATIVEVIDEOPLAYER_API void DestroyVideoPlayerInstance(VideoPlayerInstance* pInstance) {
     if (pInstance) {
+        // S'assurer que toutes les ressources média sont libérées
         CloseMedia(pInstance);
-        if (pInstance->hAudioReadyEvent) {
-            CloseHandle(pInstance->hAudioReadyEvent);
-            pInstance->hAudioReadyEvent = nullptr;
-        }
+        
+        // Supprimer la section critique
         DeleteCriticalSection(&pInstance->csClockSync);
+        
+        // Supprimer l'instance et décrémenter le compteur
         delete pInstance;
         g_instanceCount--;
     }
@@ -817,22 +818,31 @@ NATIVEVIDEOPLAYER_API HRESULT ShutdownMediaFoundation() {
         return E_FAIL; // Instances encore actives
 
     HRESULT hr = S_OK;
-    if (g_bMFInitialized) {
-        hr = MFShutdown();
-        g_bMFInitialized = false;
-    }
+    
+    // Libération des ressources DXGI et D3D
     if (g_pDXGIDeviceManager) {
         g_pDXGIDeviceManager->Release();
         g_pDXGIDeviceManager = nullptr;
     }
+    
     if (g_pD3DDevice) {
         g_pD3DDevice->Release();
         g_pD3DDevice = nullptr;
     }
+    
+    // Libération de l'énumérateur audio
     if (g_pEnumerator) {
         g_pEnumerator->Release();
         g_pEnumerator = nullptr;
     }
+    
+    // Arrêt de Media Foundation en dernier
+    if (g_bMFInitialized) {
+        hr = MFShutdown();
+        g_bMFInitialized = false;
+    }
+    
+    // Désinitialisation de COM
     CoUninitialize();
     return hr;
 }
@@ -841,53 +851,84 @@ NATIVEVIDEOPLAYER_API void CloseMedia(VideoPlayerInstance* pInstance) {
     if (!pInstance)
         return;
 
+    // Arrêt du thread audio
     pInstance->bAudioThreadRunning = FALSE;
     if (pInstance->hAudioThread) {
-        WaitForSingleObject(pInstance->hAudioThread, 5000);
+        // Attendre que le thread termine avec un timeout plus court
+        DWORD waitResult = WaitForSingleObject(pInstance->hAudioThread, 1000);
+        if (waitResult == WAIT_TIMEOUT) {
+            // Si le thread ne répond pas, on le termine
+            TerminateThread(pInstance->hAudioThread, 0);
+        }
         CloseHandle(pInstance->hAudioThread);
         pInstance->hAudioThread = nullptr;
     }
+    
+    // Libération du buffer vidéo
     if (pInstance->pLockedBuffer) {
         UnlockVideoFrame(pInstance);
     }
+    
+    // Arrêt et libération des ressources audio
     if (pInstance->pAudioClient) {
         pInstance->pAudioClient->Stop();
         pInstance->pAudioClient->Release();
         pInstance->pAudioClient = nullptr;
     }
+    
     if (pInstance->pRenderClient) {
         pInstance->pRenderClient->Release();
         pInstance->pRenderClient = nullptr;
     }
+    
     if (pInstance->pDevice) {
         pInstance->pDevice->Release();
         pInstance->pDevice = nullptr;
     }
+    
+    // Libération du format audio
     if (pInstance->pSourceAudioFormat) {
         CoTaskMemFree(pInstance->pSourceAudioFormat);
         pInstance->pSourceAudioFormat = nullptr;
     }
+    
+    // Libération des lecteurs source
     if (pInstance->pSourceReader) {
         pInstance->pSourceReader->Release();
         pInstance->pSourceReader = nullptr;
     }
+    
     if (pInstance->pSourceReaderAudio) {
         pInstance->pSourceReaderAudio->Release();
         pInstance->pSourceReaderAudio = nullptr;
     }
+    
+    // Fermeture des événements
     if (pInstance->hAudioSamplesReadyEvent) {
         CloseHandle(pInstance->hAudioSamplesReadyEvent);
         pInstance->hAudioSamplesReadyEvent = nullptr;
     }
+    
+    // Libération de l'endpoint de volume audio
     if (pInstance->pAudioEndpointVolume) {
         pInstance->pAudioEndpointVolume->Release();
         pInstance->pAudioEndpointVolume = nullptr;
     }
+    
+    // Fermeture de l'événement audio ready si présent
+    if (pInstance->hAudioReadyEvent) {
+        CloseHandle(pInstance->hAudioReadyEvent);
+        pInstance->hAudioReadyEvent = nullptr;
+    }
+    
+    // Réinitialisation des variables d'état
     pInstance->bEOF = FALSE;
     pInstance->videoWidth = pInstance->videoHeight = 0;
     pInstance->bHasAudio = FALSE;
     pInstance->bAudioInitialized = FALSE;
     pInstance->llPlaybackStartTime = pInstance->llTotalPauseTime = pInstance->llPauseStart = 0;
+    pInstance->llCurrentPosition = 0;
+    pInstance->bSeekInProgress = FALSE;
 }
 
 NATIVEVIDEOPLAYER_API HRESULT SetAudioVolume(VideoPlayerInstance* pInstance, float volume) {
@@ -918,6 +959,10 @@ NATIVEVIDEOPLAYER_API HRESULT GetAudioLevels(VideoPlayerInstance* pInstance, flo
     if (!pInstance || !pLeftLevel || !pRightLevel)
         return OP_E_INVALID_PARAMETER;
 
+    // Vérification que le périphérique audio est disponible
+    if (!pInstance->pDevice)
+        return E_FAIL;
+
     IAudioMeterInformation* pAudioMeterInfo = nullptr;
     HRESULT hr = pInstance->pDevice->Activate(__uuidof(IAudioMeterInformation), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&pAudioMeterInfo));
     if (FAILED(hr))
@@ -926,9 +971,9 @@ NATIVEVIDEOPLAYER_API HRESULT GetAudioLevels(VideoPlayerInstance* pInstance, flo
     float peaks[2] = { 0.0f, 0.0f };
     hr = pAudioMeterInfo->GetChannelsPeakValues(2, peaks);
     
+    // Toujours libérer la ressource, même en cas d'erreur
     if (pAudioMeterInfo) {
         pAudioMeterInfo->Release();
-        pAudioMeterInfo = nullptr;
     }
     
     if (FAILED(hr))
