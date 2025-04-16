@@ -208,15 +208,41 @@ static DWORD WINAPI AudioThreadProc(LPVOID lpParam) {
             ULONGLONG currentTime = GetCurrentTimeMs();
             ULONGLONG effectiveElapsed = currentTime - pInstance->llPlaybackStartTime - pInstance->llTotalPauseTime;
             int64_t diff = static_cast<int64_t>(sampleTimeMs - effectiveElapsed);
-            if (abs(diff) > 30) {
-                if (diff > 30)
+            
+            // Réduire le seuil de désynchronisation à 15ms pour une meilleure précision
+            if (abs(diff) > 15) {
+                // Si l'audio est en avance de plus de 15ms mais moins de 100ms, on attend
+                if (diff > 15 && diff < 100) {
                     PreciseSleepHighRes(diff);
+                }
+                // Si l'audio est en avance de plus de 100ms, il y a probablement un problème plus important
+                // On attend mais on limite le temps d'attente pour éviter de bloquer trop longtemps
+                else if (diff >= 100) {
+                    // Limiter le temps d'attente à 50ms pour éviter les blocages
+                    PreciseSleepHighRes(50);
+                    // Signaler une désynchronisation importante dans le débogage
+                    #ifdef _DEBUG
+                    PrintHR("Désynchronisation importante détectée", S_OK);
+                    #endif
+                }
+                // Si l'audio est en retard de plus de 15ms mais moins de 50ms,
+                // on va quand même jouer l'échantillon mais ajuster le timestamp
+                else if (diff < -15 && diff > -50) {
+                    // On continue avec l'échantillon mais on ajuste l'horloge
+                    EnterCriticalSection(&pInstance->csClockSync);
+                    // Ajuster légèrement le master clock pour compenser progressivement
+                    pInstance->llMasterClock += (diff * 5000); // Ajustement partiel (50%)
+                    LeaveCriticalSection(&pInstance->csClockSync);
+                }
+                // Si l'audio est très en retard (plus de 50ms), on saute l'échantillon
                 else {
                     pSample->Release();
                     continue;
                 }
-            } else if (diff > 0)
+            } else if (diff > 0) {
+                // Petit ajustement pour les différences minimes
                 PreciseSleepHighRes(diff);
+            }
         }
 
         IMFMediaBuffer* pBuf = nullptr;
@@ -417,8 +443,8 @@ NATIVEVIDEOPLAYER_API HRESULT OpenMedia(VideoPlayerInstance* pInstance, const wc
 
     IMFMediaType* pCurrent = nullptr;
     hr = pInstance->pSourceReader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &pCurrent);
-    if (SUCCEEDED(hr) && pCurrent) {
-        MFGetAttributeSize(pCurrent, MF_MT_FRAME_SIZE, &pInstance->videoWidth, &pInstance->videoHeight);
+    if (SUCCEEDED(hr)) {
+        hr = MFGetAttributeSize(pCurrent, MF_MT_FRAME_SIZE, &pInstance->videoWidth, &pInstance->videoHeight);
         pCurrent->Release();
     }
 
@@ -537,14 +563,35 @@ NATIVEVIDEOPLAYER_API HRESULT ReadVideoFrame(VideoPlayerInstance* pInstance, BYT
     if (pInstance->bHasAudio && masterClock > 0) {
         LONGLONG diff = llTimestamp - masterClock;
         if (diff > 0) {
+            // Vidéo en avance sur l'audio
             DWORD sleepTime = static_cast<DWORD>(min(diff / 10000, static_cast<LONGLONG>(frameTimeMs)));
+            // Limiter le temps d'attente à 2x le temps de frame pour éviter les blocages
+            if (sleepTime > frameTimeMs * 2)
+                sleepTime = static_cast<DWORD>(frameTimeMs * 2);
             if (sleepTime > 1)
                 PreciseSleepHighRes(sleepTime);
         } else if (diff < skipThreshold) {
+            // Vidéo très en retard sur l'audio - on saute cette frame
+            #ifdef _DEBUG
+            if (diff < skipThreshold * 2)
+                PrintHR("Synchronisation: saut de frame vidéo (retard important)", S_OK);
+            #endif
             pSample->Release();
             *pData = nullptr;
             *pDataSize = 0;
             return S_OK;
+        } else if (diff < 0) {
+            // Vidéo en léger retard sur l'audio - on joue quand même mais on met à jour un compteur
+            // Cela permet de suivre si les désynchronisations sont fréquentes
+            #ifdef _DEBUG
+            static int minorSyncIssues = 0;
+            minorSyncIssues++;
+            if (minorSyncIssues % 30 == 0) { // Log toutes les ~30 frames
+                char msg[100];
+                sprintf_s(msg, "Désynchronisations légères: %d (diff=%lld ms)", minorSyncIssues, diff/10000);
+                OutputDebugStringA(msg);
+            }
+            #endif
         }
     } else {
         auto frameTimeAbs = static_cast<ULONGLONG>(llTimestamp / 10000);
@@ -727,24 +774,40 @@ NATIVEVIDEOPLAYER_API HRESULT GetMediaPosition(VideoPlayerInstance* pInstance, L
     return S_OK;
 }
 
-NATIVEVIDEOPLAYER_API HRESULT SetPlaybackState(VideoPlayerInstance* pInstance, BOOL bPlaying) {
+NATIVEVIDEOPLAYER_API HRESULT SetPlaybackState(VideoPlayerInstance* pInstance, BOOL bPlaying, BOOL bStop) {
     if (!pInstance)
         return OP_E_NOT_INITIALIZED;
 
-    if (bPlaying) {
+    if (bStop && !bPlaying) {
+        if (pInstance->llPlaybackStartTime != 0) {
+            pInstance->llTotalPauseTime = 0;
+            pInstance->llPauseStart = 0;
+            pInstance->llPlaybackStartTime = 0;
+            
+            // Réinitialiser l'horloge principale pour éviter les problèmes de synchronisation
+            EnterCriticalSection(&pInstance->csClockSync);
+            pInstance->llMasterClock = 0;
+            LeaveCriticalSection(&pInstance->csClockSync);
+        }
+    } else if (bPlaying) {
         if (pInstance->llPlaybackStartTime == 0)
             pInstance->llPlaybackStartTime = GetCurrentTimeMs();
         else if (pInstance->llPauseStart != 0) {
             pInstance->llTotalPauseTime += (GetCurrentTimeMs() - pInstance->llPauseStart);
             pInstance->llPauseStart = 0;
         }
-        if (pInstance->bHasAudio && pInstance->pAudioClient)
+        if (pInstance->pAudioClient && pInstance->bAudioInitialized)
             pInstance->pAudioClient->Start();
     } else {
         if (pInstance->llPauseStart == 0)
             pInstance->llPauseStart = GetCurrentTimeMs();
-        if (pInstance->bHasAudio && pInstance->pAudioClient)
+        if (pInstance->pAudioClient && pInstance->bAudioInitialized)
             pInstance->pAudioClient->Stop();
+            
+        // Si c'est un arrêt complet (stop), libérer toutes les ressources
+        if (bStop) {
+            CloseMedia(pInstance);
+        }
     }
     return S_OK;
 }

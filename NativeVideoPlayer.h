@@ -138,9 +138,10 @@ NATIVEVIDEOPLAYER_API HRESULT GetMediaPosition(VideoPlayerInstance* pInstance, L
  * @brief Définit l'état de lecture (lecture ou pause) pour une instance spécifique.
  * @param pInstance Handle de l'instance.
  * @param bPlaying TRUE pour lecture, FALSE pour pause.
+ * @param bStop TRUE si c'est un arrêt complet, FALSE si c'est simplement une pause.
  * @return S_OK en cas de succès, ou un code d'erreur.
  */
-NATIVEVIDEOPLAYER_API HRESULT SetPlaybackState(VideoPlayerInstance* pInstance, BOOL bPlaying);
+NATIVEVIDEOPLAYER_API HRESULT SetPlaybackState(VideoPlayerInstance* pInstance, BOOL bPlaying, BOOL bStop = FALSE);
 
 /**
  * @brief Arrête Media Foundation et libère les ressources globales (après destruction de toutes les instances).
