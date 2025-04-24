@@ -340,7 +340,7 @@ NATIVEVIDEOPLAYER_API HRESULT ReadVideoFrame(VideoPlayerInstance* pInstance, BYT
     // Check if we're using automatic synchronization
     if (pInstance->bUseAutomaticSync && pInstance->pPresentationClock) {
         // With automatic synchronization, the presentation clock handles timing
-        // We just need to check if we should skip very late frames
+        // We need to check if we should skip very late frames or wait for early frames
 
         // Get current presentation time
         MFTIME clockTime = 0;
@@ -365,6 +365,16 @@ NATIVEVIDEOPLAYER_API HRESULT ReadVideoFrame(VideoPlayerInstance* pInstance, BYT
                 *pData = nullptr;
                 *pDataSize = 0;
                 return S_OK;
+            }
+            // If frame is ahead of schedule, wait to maintain correct frame rate
+            else if (diff > 0) {
+                // Convert diff from 100ns units to milliseconds and apply playback speed
+                double waitTime = diff / 10000.0;
+                // Limit maximum wait time to avoid freezing if timestamps are far apart
+                waitTime = std::min(waitTime, frameTimeMs * 2);
+                if (waitTime > 1.0) {
+                    PreciseSleepHighRes(waitTime);
+                }
             }
         }
     }
