@@ -2,6 +2,7 @@
 
 #include <windows.h>
 #include <mfapi.h>
+#include <mfidl.h>
 #include <mfreadwrite.h>
 #include <audioclient.h>
 #include <mmdeviceapi.h>
@@ -20,7 +21,7 @@ struct VideoPlayerInstance {
     UINT32 videoWidth = 0;
     UINT32 videoHeight = 0;
     BOOL bEOF = FALSE;
-    
+
     // Audio related members
     IMFSourceReader* pSourceReaderAudio = nullptr;
     BOOL bHasAudio = FALSE;
@@ -34,7 +35,12 @@ struct VideoPlayerInstance {
     BOOL bAudioThreadRunning = FALSE;
     HANDLE hAudioReadyEvent = nullptr;
     IAudioEndpointVolume* pAudioEndpointVolume = nullptr;
-    
+
+    // Media Foundation clock for synchronization
+    IMFPresentationClock* pPresentationClock = nullptr;
+    IMFMediaSource* pMediaSource = nullptr;
+    BOOL bUseAutomaticSync = TRUE;
+
     // Timing and synchronization
     LONGLONG llCurrentPosition = 0;
     ULONGLONG llPlaybackStartTime = 0;
@@ -43,7 +49,7 @@ struct VideoPlayerInstance {
     LONGLONG llMasterClock = 0;
     CRITICAL_SECTION csClockSync{};
     BOOL bSeekInProgress = FALSE;
-    
+
     // Playback control
     float instanceVolume = 1.0f; // Volume specific to this instance (1.0 = 100%)
     float playbackSpeed = 1.0f;  // Playback speed (1.0 = 100%)

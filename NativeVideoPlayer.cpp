@@ -94,10 +94,10 @@ NATIVEVIDEOPLAYER_API HRESULT OpenMedia(VideoPlayerInstance* pInstance, const wc
     // Helper function to safely release COM objects
     auto safeRelease = [](IUnknown* obj) { if (obj) obj->Release(); };
 
-    // 1. Configure and open video stream
-    // ------------------------------------------
+    // 1. Configure and open media source with both audio and video streams
+    // ------------------------------------------------------------------
     IMFAttributes* pAttributes = nullptr;
-    hr = MFCreateAttributes(&pAttributes, 4);
+    hr = MFCreateAttributes(&pAttributes, 5);
     if (FAILED(hr))
         return hr;
 
@@ -107,13 +107,20 @@ NATIVEVIDEOPLAYER_API HRESULT OpenMedia(VideoPlayerInstance* pInstance, const wc
     pAttributes->SetUnknown(MF_SOURCE_READER_D3D_MANAGER, GetDXGIDeviceManager());
     pAttributes->SetUINT32(MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, TRUE);
 
-    // Create source reader for video
+    // Enable automatic synchronization if requested
+    if (pInstance->bUseAutomaticSync) {
+        pAttributes->SetUINT32(MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, TRUE);
+    }
+
+    // Create source reader for both audio and video
     hr = MFCreateSourceReaderFromURL(url, pAttributes, &pInstance->pSourceReader);
     safeRelease(pAttributes);
     if (FAILED(hr))
         return hr;
 
-    // Select only video stream
+    // 2. Configure video stream
+    // ------------------------------------------
+    // Enable video stream
     hr = pInstance->pSourceReader->SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, FALSE);
     if (SUCCEEDED(hr))
         hr = pInstance->pSourceReader->SetStreamSelection(MF_SOURCE_READER_FIRST_VIDEO_STREAM, TRUE);
@@ -142,72 +149,148 @@ NATIVEVIDEOPLAYER_API HRESULT OpenMedia(VideoPlayerInstance* pInstance, const wc
         safeRelease(pCurrent);
     }
 
-    // 2. Configure and open audio stream (if available)
-    // ----------------------------------------------------------
-    hr = MFCreateSourceReaderFromURL(url, nullptr, &pInstance->pSourceReaderAudio);
-    if (FAILED(hr)) {
-        pInstance->pSourceReaderAudio = nullptr;
-        return S_OK; // Continue without audio
-    }
-
-    // Select only audio stream
-    hr = pInstance->pSourceReaderAudio->SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, FALSE);
-    if (SUCCEEDED(hr))
-        hr = pInstance->pSourceReaderAudio->SetStreamSelection(MF_SOURCE_READER_FIRST_AUDIO_STREAM, TRUE);
-    if (FAILED(hr)) {
-        safeRelease(pInstance->pSourceReaderAudio);
-        pInstance->pSourceReaderAudio = nullptr;
-        return S_OK; // Continue without audio
-    }
-
-    // Configure audio format (PCM 16-bit stereo 48kHz)
-    IMFMediaType* pWantedType = nullptr;
-    hr = MFCreateMediaType(&pWantedType);
+    // 3. Configure audio stream (if available)
+    // ------------------------------------------
+    // Try to enable audio stream
+    hr = pInstance->pSourceReader->SetStreamSelection(MF_SOURCE_READER_FIRST_AUDIO_STREAM, TRUE);
     if (SUCCEEDED(hr)) {
-        pWantedType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
-        pWantedType->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
-        pWantedType->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2);
-        pWantedType->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 48000);
-        pWantedType->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, 4);
-        pWantedType->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 192000);
-        pWantedType->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
-        hr = pInstance->pSourceReaderAudio->SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, pWantedType);
-        safeRelease(pWantedType);
-    }
-    if (FAILED(hr)) {
-        safeRelease(pInstance->pSourceReaderAudio);
-        pInstance->pSourceReaderAudio = nullptr;
-        return S_OK; // Continue without audio
-    }
+        // Configure audio format (PCM 16-bit stereo 48kHz)
+        IMFMediaType* pWantedType = nullptr;
+        hr = MFCreateMediaType(&pWantedType);
+        if (SUCCEEDED(hr)) {
+            pWantedType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+            pWantedType->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
+            pWantedType->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2);
+            pWantedType->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 48000);
+            pWantedType->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, 4);
+            pWantedType->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 192000);
+            pWantedType->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+            hr = pInstance->pSourceReader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, pWantedType);
+            safeRelease(pWantedType);
+        }
 
-    // Initialize WASAPI with current audio format
-    IMFMediaType* pActualType = nullptr;
-    hr = pInstance->pSourceReaderAudio->GetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, &pActualType);
-    if (SUCCEEDED(hr) && pActualType) {
-        WAVEFORMATEX* pWfx = nullptr;
-        UINT32 size = 0;
-        hr = MFCreateWaveFormatExFromMFMediaType(pActualType, &pWfx, &size);
-        if (SUCCEEDED(hr) && pWfx) {
-            hr = InitWASAPI(pInstance, pWfx);
-            if (FAILED(hr)) {
-                PrintHR("InitWASAPI failed", hr);
-                if (pWfx) CoTaskMemFree(pWfx);
+        if (SUCCEEDED(hr)) {
+            // Get the actual audio format for WASAPI
+            IMFMediaType* pActualType = nullptr;
+            hr = pInstance->pSourceReader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, &pActualType);
+            if (SUCCEEDED(hr) && pActualType) {
+                WAVEFORMATEX* pWfx = nullptr;
+                UINT32 size = 0;
+                hr = MFCreateWaveFormatExFromMFMediaType(pActualType, &pWfx, &size);
+                if (SUCCEEDED(hr) && pWfx) {
+                    hr = InitWASAPI(pInstance, pWfx);
+                    if (FAILED(hr)) {
+                        PrintHR("InitWASAPI failed", hr);
+                        if (pWfx) CoTaskMemFree(pWfx);
+                        safeRelease(pActualType);
+                    } else {
+                        if (pInstance->pSourceAudioFormat)
+                            CoTaskMemFree(pInstance->pSourceAudioFormat);
+                        pInstance->pSourceAudioFormat = pWfx;
+                        pInstance->bHasAudio = TRUE;
+                    }
+                }
                 safeRelease(pActualType);
+            }
+        }
+
+        // Create a separate audio source reader for the audio thread
+        // This is needed even with automatic synchronization
+        hr = MFCreateSourceReaderFromURL(url, nullptr, &pInstance->pSourceReaderAudio);
+        if (SUCCEEDED(hr)) {
+            // Select only audio stream
+            hr = pInstance->pSourceReaderAudio->SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, FALSE);
+            if (SUCCEEDED(hr))
+                hr = pInstance->pSourceReaderAudio->SetStreamSelection(MF_SOURCE_READER_FIRST_AUDIO_STREAM, TRUE);
+
+            if (SUCCEEDED(hr)) {
+                // Configure audio format (same as main reader)
+                IMFMediaType* pWantedAudioType = nullptr;
+                hr = MFCreateMediaType(&pWantedAudioType);
+                if (SUCCEEDED(hr)) {
+                    pWantedAudioType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+                    pWantedAudioType->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
+                    pWantedAudioType->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2);
+                    pWantedAudioType->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 48000);
+                    pWantedAudioType->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, 4);
+                    pWantedAudioType->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 192000);
+                    pWantedAudioType->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+                    hr = pInstance->pSourceReaderAudio->SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, pWantedAudioType);
+                    safeRelease(pWantedAudioType);
+                }
+            }
+
+            if (FAILED(hr)) {
+                PrintHR("Failed to configure audio source reader", hr);
                 safeRelease(pInstance->pSourceReaderAudio);
                 pInstance->pSourceReaderAudio = nullptr;
-                return S_OK; // Continue without audio
             }
-            if (pInstance->pSourceAudioFormat)
-                CoTaskMemFree(pInstance->pSourceAudioFormat);
-            pInstance->pSourceAudioFormat = pWfx;
+        } else {
+            PrintHR("Failed to create audio source reader", hr);
         }
-        safeRelease(pActualType);
     }
 
-    // 3. Start audio thread if ready
-    // -------------------------------------------
-    pInstance->bHasAudio = TRUE;
-    if (pInstance->bAudioInitialized) {
+    // 4. Set up presentation clock for automatic synchronization
+    // ----------------------------------------------------------
+    if (pInstance->bUseAutomaticSync) {
+        // Get the media source from the source reader
+        hr = pInstance->pSourceReader->GetServiceForStream(
+            MF_SOURCE_READER_MEDIASOURCE, 
+            GUID_NULL, 
+            IID_PPV_ARGS(&pInstance->pMediaSource));
+
+        if (SUCCEEDED(hr)) {
+            // Create the presentation clock
+            hr = MFCreatePresentationClock(&pInstance->pPresentationClock);
+            if (SUCCEEDED(hr)) {
+                // Create a system time source
+                IMFPresentationTimeSource* pTimeSource = nullptr;
+                hr = MFCreateSystemTimeSource(&pTimeSource);
+                if (SUCCEEDED(hr)) {
+                    // Set the time source on the presentation clock
+                    hr = pInstance->pPresentationClock->SetTimeSource(pTimeSource);
+                    if (SUCCEEDED(hr)) {
+                        // Set the rate control on the presentation clock
+                        IMFRateControl* pRateControl = nullptr;
+                        hr = pInstance->pPresentationClock->QueryInterface(IID_PPV_ARGS(&pRateControl));
+                        if (SUCCEEDED(hr)) {
+                            // Explicitly set rate to 1.0 to ensure correct initial playback speed
+                            hr = pRateControl->SetRate(FALSE, 1.0f);
+                            if (FAILED(hr)) {
+                                PrintHR("Failed to set initial presentation clock rate", hr);
+                            }
+                            pRateControl->Release();
+                        }
+
+                        // Get the media sink from the media source
+                        IMFMediaSink* pMediaSink = nullptr;
+                        hr = pInstance->pMediaSource->QueryInterface(IID_PPV_ARGS(&pMediaSink));
+                        if (SUCCEEDED(hr)) {
+                            // Set the presentation clock on the media sink
+                            IMFClockStateSink* pClockStateSink = nullptr;
+                            hr = pMediaSink->QueryInterface(IID_PPV_ARGS(&pClockStateSink));
+                            if (SUCCEEDED(hr)) {
+                                // Start the presentation clock
+                                hr = pInstance->pPresentationClock->Start(0);
+                                if (FAILED(hr)) {
+                                    PrintHR("Failed to start presentation clock", hr);
+                                }
+                                pClockStateSink->Release();
+                            }
+                            pMediaSink->Release();
+                        } else {
+                            PrintHR("Failed to get media sink from media source", hr);
+                        }
+                    }
+                    safeRelease(pTimeSource);
+                }
+            }
+        }
+    }
+
+    // 5. Start audio thread for both manual and automatic synchronization
+    // ----------------------------------------------------
+    if (pInstance->bHasAudio && pInstance->bAudioInitialized && pInstance->pSourceReaderAudio) {
         hr = StartAudioThread(pInstance);
         if (FAILED(hr)) {
             PrintHR("StartAudioThread failed", hr);
@@ -251,52 +334,89 @@ NATIVEVIDEOPLAYER_API HRESULT ReadVideoFrame(VideoPlayerInstance* pInstance, BYT
         return S_OK; 
     }
 
-    LONGLONG masterClock = 0;
-    EnterCriticalSection(&pInstance->csClockSync);
-    masterClock = pInstance->llMasterClock;
-    LeaveCriticalSection(&pInstance->csClockSync);
+    // Store current position
+    pInstance->llCurrentPosition = llTimestamp;
 
-    UINT frameRateNum = 30, frameRateDenom = 1;
-    GetVideoFrameRate(pInstance, &frameRateNum, &frameRateDenom);
-    double frameTimeMs = 1000.0 * frameRateDenom / frameRateNum;
-    auto skipThreshold = static_cast<LONGLONG>(-frameTimeMs * 3 * 10000);
+    // Check if we're using automatic synchronization
+    if (pInstance->bUseAutomaticSync && pInstance->pPresentationClock) {
+        // With automatic synchronization, the presentation clock handles timing
+        // We just need to check if we should skip very late frames
 
-    // Video synchronization
-    if (pInstance->bHasAudio && masterClock > 0) {
-        // Sync with audio clock
-        auto adjustedMasterClock = static_cast<LONGLONG>(masterClock * pInstance->playbackSpeed);
-        LONGLONG diff = llTimestamp - adjustedMasterClock;
+        // Get current presentation time
+        MFTIME clockTime = 0;
+        hr = pInstance->pPresentationClock->GetTime(&clockTime);
 
-        if (diff > 0) {
-            // Video ahead: wait
-            double maxWaitTime = frameTimeMs * 2 / pInstance->playbackSpeed;
-            double waitTime = std::min<double>(diff / 10000.0, maxWaitTime);
-            if (waitTime > 1.0)
-                PreciseSleepHighRes(waitTime);
-        } 
-        else if (diff < skipThreshold) {
-            // Video very late: skip frame
-            pSample->Release();
-            *pData = nullptr;
-            *pDataSize = 0;
-            return S_OK;
+        if (SUCCEEDED(hr)) {
+            // Calculate frame rate for skip threshold
+            UINT frameRateNum = 30, frameRateDenom = 1;
+            GetVideoFrameRate(pInstance, &frameRateNum, &frameRateDenom);
+            double frameTimeMs = 1000.0 * frameRateDenom / frameRateNum;
+            auto skipThreshold = static_cast<LONGLONG>(-frameTimeMs * 3 * 10000);
+
+            // When using automatic synchronization, the presentation clock's rate 
+            // already accounts for playback speed, so we don't need to adjust the clock time
+
+            // Calculate difference between frame timestamp and clock
+            LONGLONG diff = llTimestamp - clockTime;
+
+            // If frame is very late, skip it
+            if (diff < skipThreshold) {
+                pSample->Release();
+                *pData = nullptr;
+                *pDataSize = 0;
+                return S_OK;
+            }
         }
-        // If slightly late, play frame normally
-    } 
+    }
     else {
-        // No audio or no clock: sync with system time
-        auto frameTimeAbs = static_cast<ULONGLONG>(llTimestamp / 10000);
-        ULONGLONG currentTime = GetCurrentTimeMs();
-        auto effectiveElapsed = static_cast<ULONGLONG>(
-            (currentTime - pInstance->llPlaybackStartTime - pInstance->llTotalPauseTime) 
-            * pInstance->playbackSpeed);
+        // Manual synchronization (original implementation)
+        LONGLONG masterClock = 0;
+        EnterCriticalSection(&pInstance->csClockSync);
+        masterClock = pInstance->llMasterClock;
+        LeaveCriticalSection(&pInstance->csClockSync);
 
-        if (frameTimeAbs > effectiveElapsed) {
-            // Limit wait time
-            double waitTime = std::min<double>(
-                (frameTimeAbs - effectiveElapsed) / pInstance->playbackSpeed,
-                frameTimeMs * 1.5 / pInstance->playbackSpeed);
-            PreciseSleepHighRes(waitTime);
+        UINT frameRateNum = 30, frameRateDenom = 1;
+        GetVideoFrameRate(pInstance, &frameRateNum, &frameRateDenom);
+        double frameTimeMs = 1000.0 * frameRateDenom / frameRateNum;
+        auto skipThreshold = static_cast<LONGLONG>(-frameTimeMs * 3 * 10000);
+
+        // Video synchronization
+        if (pInstance->bHasAudio && masterClock > 0) {
+            // Sync with audio clock
+            auto adjustedMasterClock = static_cast<LONGLONG>(masterClock * pInstance->playbackSpeed);
+            LONGLONG diff = llTimestamp - adjustedMasterClock;
+
+            if (diff > 0) {
+                // Video ahead: wait
+                double maxWaitTime = frameTimeMs * 2 / pInstance->playbackSpeed;
+                double waitTime = std::min<double>(diff / 10000.0, maxWaitTime);
+                if (waitTime > 1.0)
+                    PreciseSleepHighRes(waitTime);
+            } 
+            else if (diff < skipThreshold) {
+                // Video very late: skip frame
+                pSample->Release();
+                *pData = nullptr;
+                *pDataSize = 0;
+                return S_OK;
+            }
+            // If slightly late, play frame normally
+        } 
+        else {
+            // No audio or no clock: sync with system time
+            auto frameTimeAbs = static_cast<ULONGLONG>(llTimestamp / 10000);
+            ULONGLONG currentTime = GetCurrentTimeMs();
+            auto effectiveElapsed = static_cast<ULONGLONG>(
+                (currentTime - pInstance->llPlaybackStartTime - pInstance->llTotalPauseTime) 
+                * pInstance->playbackSpeed);
+
+            if (frameTimeAbs > effectiveElapsed) {
+                // Limit wait time
+                double waitTime = std::min<double>(
+                    (frameTimeAbs - effectiveElapsed) / pInstance->playbackSpeed,
+                    frameTimeMs * 1.5 / pInstance->playbackSpeed);
+                PreciseSleepHighRes(waitTime);
+            }
         }
     }
 
@@ -318,7 +438,6 @@ NATIVEVIDEOPLAYER_API HRESULT ReadVideoFrame(VideoPlayerInstance* pInstance, BYT
         return hr;
     }
 
-    pInstance->llCurrentPosition = llTimestamp;
     pInstance->pLockedBuffer = pBuffer;
     pInstance->pLockedBytes = pBytes;
     pInstance->lockedMaxSize = cbMax;
@@ -396,6 +515,12 @@ NATIVEVIDEOPLAYER_API HRESULT SeekMedia(VideoPlayerInstance* pInstance, LONGLONG
         Sleep(5);
     }
 
+    // If using automatic synchronization, stop the presentation clock
+    if (pInstance->bUseAutomaticSync && pInstance->pPresentationClock) {
+        pInstance->pPresentationClock->Stop();
+    }
+
+    // Seek the main source reader
     HRESULT hr = pInstance->pSourceReader->SetCurrentPosition(GUID_NULL, var);
     if (FAILED(hr)) {
         EnterCriticalSection(&pInstance->csClockSync);
@@ -405,21 +530,25 @@ NATIVEVIDEOPLAYER_API HRESULT SeekMedia(VideoPlayerInstance* pInstance, LONGLONG
         return hr;
     }
 
-    if (pInstance->bHasAudio && pInstance->pSourceReaderAudio) {
+    // If using separate audio reader, seek it too
+    if (pInstance->bHasAudio && pInstance->pSourceReaderAudio && !pInstance->bUseAutomaticSync) {
         hr = pInstance->pSourceReaderAudio->SetCurrentPosition(GUID_NULL, var);
         if (FAILED(hr)) {
             PrintHR("Failed to seek audio stream", hr);
         }
-        if (pInstance->pRenderClient && pInstance->pAudioClient) {
-            UINT32 bufferFrameCount = 0;
-            if (SUCCEEDED(pInstance->pAudioClient->GetBufferSize(&bufferFrameCount))) {
-                pInstance->pAudioClient->Reset();
-            }
+    }
+
+    // Reset audio client if needed
+    if (pInstance->bHasAudio && pInstance->pRenderClient && pInstance->pAudioClient) {
+        UINT32 bufferFrameCount = 0;
+        if (SUCCEEDED(pInstance->pAudioClient->GetBufferSize(&bufferFrameCount))) {
+            pInstance->pAudioClient->Reset();
         }
     }
 
     PropVariantClear(&var);
 
+    // Update position and state
     EnterCriticalSection(&pInstance->csClockSync);
     pInstance->llMasterClock = llPositionIn100Ns;
     pInstance->llCurrentPosition = llPositionIn100Ns;
@@ -428,14 +557,25 @@ NATIVEVIDEOPLAYER_API HRESULT SeekMedia(VideoPlayerInstance* pInstance, LONGLONG
 
     pInstance->bEOF = FALSE;
 
+    // Update playback start time for manual synchronization
     ULONGLONG currentTime = GetCurrentTimeMs();
     pInstance->llPlaybackStartTime = currentTime - static_cast<ULONGLONG>(llPositionIn100Ns / 10000);
 
+    // If using automatic synchronization, restart the presentation clock at the new position
+    if (pInstance->bUseAutomaticSync && pInstance->pPresentationClock) {
+        hr = pInstance->pPresentationClock->Start(llPositionIn100Ns);
+        if (FAILED(hr)) {
+            PrintHR("Failed to restart presentation clock after seek", hr);
+        }
+    }
+
+    // Restart audio if it was playing
     if (pInstance->bHasAudio && pInstance->pAudioClient && wasPlaying) {
         Sleep(5);
         pInstance->pAudioClient->Start();
     }
 
+    // Signal audio thread to continue
     if (pInstance->hAudioReadyEvent)
         SetEvent(pInstance->hAudioReadyEvent);
 
@@ -472,7 +612,10 @@ NATIVEVIDEOPLAYER_API HRESULT SetPlaybackState(VideoPlayerInstance* pInstance, B
     if (!pInstance)
         return OP_E_NOT_INITIALIZED;
 
+    HRESULT hr = S_OK;
+
     if (bStop && !bPlaying) {
+        // Stop playback completely
         if (pInstance->llPlaybackStartTime != 0) {
             pInstance->llTotalPauseTime = 0;
             pInstance->llPauseStart = 0;
@@ -482,23 +625,58 @@ NATIVEVIDEOPLAYER_API HRESULT SetPlaybackState(VideoPlayerInstance* pInstance, B
             EnterCriticalSection(&pInstance->csClockSync);
             pInstance->llMasterClock = 0;
             LeaveCriticalSection(&pInstance->csClockSync);
+
+            // Stop presentation clock if using automatic synchronization
+            if (pInstance->bUseAutomaticSync && pInstance->pPresentationClock) {
+                pInstance->pPresentationClock->Stop();
+            }
         }
     } else if (bPlaying) {
-        if (pInstance->llPlaybackStartTime == 0)
+        // Start or resume playback
+        if (pInstance->llPlaybackStartTime == 0) {
+            // First start
             pInstance->llPlaybackStartTime = GetCurrentTimeMs();
-        else if (pInstance->llPauseStart != 0) {
+        } else if (pInstance->llPauseStart != 0) {
+            // Resume from pause
             pInstance->llTotalPauseTime += (GetCurrentTimeMs() - pInstance->llPauseStart);
             pInstance->llPauseStart = 0;
         }
-        if (pInstance->pAudioClient && pInstance->bAudioInitialized)
+
+        // Start audio client if available
+        if (pInstance->pAudioClient && pInstance->bAudioInitialized) {
             pInstance->pAudioClient->Start();
+        }
+
+        // Start or resume presentation clock if using automatic synchronization
+        if (pInstance->bUseAutomaticSync && pInstance->pPresentationClock) {
+            MFTIME clockTime = 0;
+            if (SUCCEEDED(pInstance->pPresentationClock->GetTime(&clockTime))) {
+                hr = pInstance->pPresentationClock->Start(clockTime);
+                if (FAILED(hr)) {
+                    PrintHR("Failed to start presentation clock", hr);
+                }
+            }
+        }
     } else {
-        if (pInstance->llPauseStart == 0)
+        // Pause playback
+        if (pInstance->llPauseStart == 0) {
             pInstance->llPauseStart = GetCurrentTimeMs();
-        if (pInstance->pAudioClient && pInstance->bAudioInitialized)
+        }
+
+        // Pause audio client if available
+        if (pInstance->pAudioClient && pInstance->bAudioInitialized) {
             pInstance->pAudioClient->Stop();
+        }
+
+        // Pause presentation clock if using automatic synchronization
+        if (pInstance->bUseAutomaticSync && pInstance->pPresentationClock) {
+            hr = pInstance->pPresentationClock->Pause();
+            if (FAILED(hr)) {
+                PrintHR("Failed to pause presentation clock", hr);
+            }
+        }
     }
-    return S_OK;
+    return hr;
 }
 
 NATIVEVIDEOPLAYER_API HRESULT ShutdownMediaFoundation() {
@@ -526,6 +704,16 @@ NATIVEVIDEOPLAYER_API void CloseMedia(VideoPlayerInstance* pInstance) {
         SAFE_RELEASE(pInstance->pAudioClient);
     }
 
+    // Stop and release presentation clock
+    if (pInstance->pPresentationClock) {
+        pInstance->pPresentationClock->Stop();
+        SAFE_RELEASE(pInstance->pPresentationClock);
+    }
+
+    // Release media source
+    SAFE_RELEASE(pInstance->pMediaSource);
+
+    // Release other COM resources
     SAFE_RELEASE(pInstance->pRenderClient);
     SAFE_RELEASE(pInstance->pDevice);
     SAFE_RELEASE(pInstance->pAudioEndpointVolume);
@@ -581,6 +769,22 @@ NATIVEVIDEOPLAYER_API HRESULT SetPlaybackSpeed(VideoPlayerInstance* pInstance, f
 
     // Store speed in instance
     pInstance->playbackSpeed = speed;
+
+    // If using automatic synchronization, update the presentation clock rate
+    if (pInstance->bUseAutomaticSync && pInstance->pPresentationClock) {
+        // Get the rate control interface from the presentation clock
+        IMFRateControl* pRateControl = nullptr;
+        HRESULT hr = pInstance->pPresentationClock->QueryInterface(IID_PPV_ARGS(&pRateControl));
+        if (SUCCEEDED(hr)) {
+            // Set the playback rate
+            hr = pRateControl->SetRate(FALSE, speed);
+            if (FAILED(hr)) {
+                PrintHR("Failed to set presentation clock rate", hr);
+                // Continue anyway, as we'll use the playbackSpeed value for manual adjustments
+            }
+            pRateControl->Release();
+        }
+    }
 
     return S_OK;
 }

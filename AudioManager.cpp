@@ -112,7 +112,7 @@ DWORD WINAPI AudioThreadProc(LPVOID lpParam) {
         EnterCriticalSection(&pInstance->csClockSync);
         seekInProgress = pInstance->bSeekInProgress;
         LeaveCriticalSection(&pInstance->csClockSync);
-        
+
         if (seekInProgress || pInstance->llPauseStart != 0) {
             PreciseSleepHighRes(10);
             continue;
@@ -128,7 +128,7 @@ DWORD WINAPI AudioThreadProc(LPVOID lpParam) {
         EnterCriticalSection(&pInstance->csClockSync);
         seekInProgress = pInstance->bSeekInProgress;
         LeaveCriticalSection(&pInstance->csClockSync);
-        
+
         if (seekInProgress) {
             if (pSample) pSample->Release();
             PreciseSleepHighRes(10);
@@ -146,17 +146,32 @@ DWORD WINAPI AudioThreadProc(LPVOID lpParam) {
         }
 
         // Audio/video synchronization
-        if (llTimeStamp > 0 && pInstance->llPlaybackStartTime > 0) {
-            auto sampleTimeMs = static_cast<ULONGLONG>(llTimeStamp / 10000);
-            ULONGLONG currentTime = GetCurrentTimeMs();
+        if (llTimeStamp > 0) {
+            int64_t diff = 0;
 
-            // Calculate elapsed time adjusted by playback speed
-            auto effectiveElapsed = static_cast<ULONGLONG>(
-                (currentTime - pInstance->llPlaybackStartTime - pInstance->llTotalPauseTime)
-                * pInstance->playbackSpeed);
+            // Use presentation clock for synchronization if automatic sync is enabled
+            if (pInstance->bUseAutomaticSync && pInstance->pPresentationClock) {
+                MFTIME clockTime = 0;
+                if (SUCCEEDED(pInstance->pPresentationClock->GetTime(&clockTime))) {
+                    // Calculate difference between sample timestamp and presentation clock
+                    // When using automatic synchronization, the presentation clock's rate 
+                    // already accounts for playback speed, so we don't need to adjust the clock time
+                    diff = static_cast<int64_t>((llTimeStamp - clockTime) / 10000);
+                }
+            }
+            // Otherwise use system time-based synchronization (original method)
+            else if (pInstance->llPlaybackStartTime > 0) {
+                auto sampleTimeMs = static_cast<ULONGLONG>(llTimeStamp / 10000);
+                ULONGLONG currentTime = GetCurrentTimeMs();
 
-            // Calculate difference between sample time and elapsed time
-            auto diff = static_cast<int64_t>(sampleTimeMs - effectiveElapsed);
+                // Calculate elapsed time adjusted by playback speed
+                auto effectiveElapsed = static_cast<ULONGLONG>(
+                    (currentTime - pInstance->llPlaybackStartTime - pInstance->llTotalPauseTime)
+                    * pInstance->playbackSpeed);
+
+                // Calculate difference between sample time and elapsed time
+                diff = static_cast<int64_t>(sampleTimeMs - effectiveElapsed);
+            }
 
             // Handle different synchronization cases
             if (diff > 15) {
@@ -170,10 +185,12 @@ DWORD WINAPI AudioThreadProc(LPVOID lpParam) {
                 continue;
             }
             else if (diff < -15) {
-                // Audio slightly late: adjust clock
-                EnterCriticalSection(&pInstance->csClockSync);
-                pInstance->llMasterClock += static_cast<LONGLONG>((diff * 5000) / pInstance->playbackSpeed);
-                LeaveCriticalSection(&pInstance->csClockSync);
+                // Audio slightly late: adjust clock if not using automatic sync
+                if (!pInstance->bUseAutomaticSync) {
+                    EnterCriticalSection(&pInstance->csClockSync);
+                    pInstance->llMasterClock += static_cast<LONGLONG>((diff * 5000) / pInstance->playbackSpeed);
+                    LeaveCriticalSection(&pInstance->csClockSync);
+                }
             }
             else if (diff > 0) {
                 // Small adjustment for minimal differences
