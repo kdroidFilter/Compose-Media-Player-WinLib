@@ -343,7 +343,7 @@ NATIVEVIDEOPLAYER_API HRESULT ReadVideoFrame(VideoPlayerInstance* pInstance, BYT
 
         if (SUCCEEDED(hr)) {
             // Calculate frame rate for skip threshold
-            UINT frameRateNum = 30, frameRateDenom = 1;
+            UINT frameRateNum = 60, frameRateDenom = 1;
             GetVideoFrameRate(pInstance, &frameRateNum, &frameRateDenom);
             double frameTimeMs = 1000.0 * frameRateDenom / frameRateNum;
             auto skipThreshold = static_cast<LONGLONG>(-frameTimeMs * 3 * 10000);
