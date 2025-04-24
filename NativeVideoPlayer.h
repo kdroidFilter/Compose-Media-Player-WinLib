@@ -91,7 +91,7 @@ NATIVEVIDEOPLAYER_API void CloseMedia(VideoPlayerInstance* pInstance);
  * @param pInstance Handle de l'instance.
  * @return TRUE si fin de flux, FALSE sinon.
  */
-NATIVEVIDEOPLAYER_API BOOL IsEOF(VideoPlayerInstance* pInstance);
+NATIVEVIDEOPLAYER_API BOOL IsEOF(const VideoPlayerInstance* pInstance);
 
 /**
  * @brief Récupère les dimensions de la vidéo pour une instance spécifique.
@@ -99,7 +99,7 @@ NATIVEVIDEOPLAYER_API BOOL IsEOF(VideoPlayerInstance* pInstance);
  * @param pWidth Pointeur pour recevoir la largeur en pixels.
  * @param pHeight Pointeur pour recevoir la hauteur en pixels.
  */
-NATIVEVIDEOPLAYER_API void GetVideoSize(VideoPlayerInstance* pInstance, UINT32* pWidth, UINT32* pHeight);
+NATIVEVIDEOPLAYER_API void GetVideoSize(const VideoPlayerInstance* pInstance, UINT32* pWidth, UINT32* pHeight);
 
 /**
  * @brief Récupère le taux de rafraîchissement (frame rate) de la vidéo pour une instance spécifique.
@@ -108,7 +108,7 @@ NATIVEVIDEOPLAYER_API void GetVideoSize(VideoPlayerInstance* pInstance, UINT32* 
  * @param pDenom Pointeur pour recevoir le dénominateur.
  * @return S_OK en cas de succès, ou un code d'erreur.
  */
-NATIVEVIDEOPLAYER_API HRESULT GetVideoFrameRate(VideoPlayerInstance* pInstance, UINT* pNum, UINT* pDenom);
+NATIVEVIDEOPLAYER_API HRESULT GetVideoFrameRate(const VideoPlayerInstance* pInstance, UINT* pNum, UINT* pDenom);
 
 /**
  * @brief Recherche une position spécifique dans le média pour une instance spécifique.
@@ -124,7 +124,7 @@ NATIVEVIDEOPLAYER_API HRESULT SeekMedia(VideoPlayerInstance* pInstance, LONGLONG
  * @param pDuration Pointeur pour recevoir la durée (en 100-ns).
  * @return S_OK en cas de succès, ou un code d'erreur.
  */
-NATIVEVIDEOPLAYER_API HRESULT GetMediaDuration(VideoPlayerInstance* pInstance, LONGLONG* pDuration);
+NATIVEVIDEOPLAYER_API HRESULT GetMediaDuration(const VideoPlayerInstance* pInstance, LONGLONG* pDuration);
 
 /**
  * @brief Obtient la position de lecture courante pour une instance spécifique.
@@ -132,7 +132,7 @@ NATIVEVIDEOPLAYER_API HRESULT GetMediaDuration(VideoPlayerInstance* pInstance, L
  * @param pPosition Pointeur pour recevoir la position (en 100-ns).
  * @return S_OK en cas de succès, ou un code d'erreur.
  */
-NATIVEVIDEOPLAYER_API HRESULT GetMediaPosition(VideoPlayerInstance* pInstance, LONGLONG* pPosition);
+NATIVEVIDEOPLAYER_API HRESULT GetMediaPosition(const VideoPlayerInstance* pInstance, LONGLONG* pPosition);
 
 /**
  * @brief Définit l'état de lecture (lecture ou pause) pour une instance spécifique.
@@ -163,7 +163,7 @@ NATIVEVIDEOPLAYER_API HRESULT SetAudioVolume(VideoPlayerInstance* pInstance, flo
  * @param volume Pointeur pour recevoir le niveau de volume (0.0 à 1.0).
  * @return S_OK en cas de succès, ou un code d'erreur.
  */
-NATIVEVIDEOPLAYER_API HRESULT GetAudioVolume(VideoPlayerInstance* pInstance, float* volume);
+NATIVEVIDEOPLAYER_API HRESULT GetAudioVolume(const VideoPlayerInstance* pInstance, float* volume);
 
 /**
  * @brief Récupère les niveaux audio pour les canaux gauche et droit pour une instance spécifique.
@@ -172,7 +172,23 @@ NATIVEVIDEOPLAYER_API HRESULT GetAudioVolume(VideoPlayerInstance* pInstance, flo
  * @param pRightLevel Pointeur pour le niveau du canal droit.
  * @return S_OK en cas de succès, ou un code d'erreur.
  */
-NATIVEVIDEOPLAYER_API HRESULT GetAudioLevels(VideoPlayerInstance* pInstance, float* pLeftLevel, float* pRightLevel);
+NATIVEVIDEOPLAYER_API HRESULT GetAudioLevels(const VideoPlayerInstance* pInstance, float* pLeftLevel, float* pRightLevel);
+
+/**
+ * @brief Définit la vitesse de lecture pour une instance spécifique.
+ * @param pInstance Handle de l'instance.
+ * @param speed Vitesse de lecture (0.5 à 2.0, où 1.0 est la vitesse normale).
+ * @return S_OK en cas de succès, ou un code d'erreur.
+ */
+NATIVEVIDEOPLAYER_API HRESULT SetPlaybackSpeed(VideoPlayerInstance* pInstance, float speed);
+
+/**
+ * @brief Récupère la vitesse de lecture actuelle pour une instance spécifique.
+ * @param pInstance Handle de l'instance.
+ * @param pSpeed Pointeur pour recevoir la vitesse de lecture.
+ * @return S_OK en cas de succès, ou un code d'erreur.
+ */
+NATIVEVIDEOPLAYER_API HRESULT GetPlaybackSpeed(const VideoPlayerInstance* pInstance, float* pSpeed);
 
 #ifdef __cplusplus
 }

@@ -23,6 +23,13 @@ file(MAKE_DIRECTORY ${OUTPUT_DIR})
 add_library(NativeVideoPlayer SHARED
         NativeVideoPlayer.cpp
         NativeVideoPlayer.h
+        VideoPlayerInstance.h
+        Utils.cpp
+        Utils.h
+        MediaFoundationManager.cpp
+        MediaFoundationManager.h
+        AudioManager.cpp
+        AudioManager.h
 )
 
 # Compilation definitions
