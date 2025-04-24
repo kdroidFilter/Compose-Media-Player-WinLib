@@ -10,6 +10,28 @@
 #include <audioclient.h>
 #include <mmdeviceapi.h>
 
+// Structure to hold video metadata
+typedef struct VideoMetadata {
+    wchar_t title[256];          // Title of the video (empty if not available)
+    LONGLONG duration;           // Duration in 100-ns units
+    UINT32 width;                // Width in pixels
+    UINT32 height;               // Height in pixels
+    LONGLONG bitrate;            // Bitrate in bits per second
+    float frameRate;             // Frame rate in frames per second
+    wchar_t mimeType[64];        // MIME type of the video
+    UINT32 audioChannels;        // Number of audio channels
+    UINT32 audioSampleRate;      // Audio sample rate in Hz
+    BOOL hasTitle;               // TRUE if title is available
+    BOOL hasDuration;            // TRUE if duration is available
+    BOOL hasWidth;               // TRUE if width is available
+    BOOL hasHeight;              // TRUE if height is available
+    BOOL hasBitrate;             // TRUE if bitrate is available
+    BOOL hasFrameRate;           // TRUE if frame rate is available
+    BOOL hasMimeType;            // TRUE if MIME type is available
+    BOOL hasAudioChannels;       // TRUE if audio channels is available
+    BOOL hasAudioSampleRate;     // TRUE if audio sample rate is available
+} VideoMetadata;
+
 // Macro d'exportation pour la DLL Windows
 #ifdef _WIN32
 #ifdef NATIVEVIDEOPLAYER_EXPORTS
@@ -189,6 +211,14 @@ NATIVEVIDEOPLAYER_API HRESULT SetPlaybackSpeed(VideoPlayerInstance* pInstance, f
  * @return S_OK en cas de succès, ou un code d'erreur.
  */
 NATIVEVIDEOPLAYER_API HRESULT GetPlaybackSpeed(const VideoPlayerInstance* pInstance, float* pSpeed);
+
+/**
+ * @brief Retrieves all available metadata for the current media.
+ * @param pInstance Handle to the instance.
+ * @param pMetadata Pointer to receive the metadata structure.
+ * @return S_OK on success, or an error code.
+ */
+NATIVEVIDEOPLAYER_API HRESULT GetVideoMetadata(const VideoPlayerInstance* pInstance, VideoMetadata* pMetadata);
 
 #ifdef __cplusplus
 }

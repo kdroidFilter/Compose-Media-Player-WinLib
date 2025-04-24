@@ -733,3 +733,200 @@ NATIVEVIDEOPLAYER_API HRESULT GetPlaybackSpeed(const VideoPlayerInstance* pInsta
 
     return S_OK;
 }
+
+NATIVEVIDEOPLAYER_API HRESULT GetVideoMetadata(const VideoPlayerInstance* pInstance, VideoMetadata* pMetadata) {
+    if (!pInstance || !pMetadata)
+        return OP_E_INVALID_PARAMETER;
+    if (!pInstance->pSourceReader)
+        return OP_E_NOT_INITIALIZED;
+
+    // Initialize metadata structure with default values
+    ZeroMemory(pMetadata, sizeof(VideoMetadata));
+
+    HRESULT hr = S_OK;
+
+    // Get media source for property access
+    IMFMediaSource* pMediaSource = nullptr;
+    IMFPresentationDescriptor* pPresentationDescriptor = nullptr;
+
+    // Get media source from source reader
+    hr = pInstance->pSourceReader->GetServiceForStream(
+        MF_SOURCE_READER_MEDIASOURCE, 
+        GUID_NULL, 
+        IID_PPV_ARGS(&pMediaSource));
+
+    if (SUCCEEDED(hr) && pMediaSource) {
+        // Get presentation descriptor
+        hr = pMediaSource->CreatePresentationDescriptor(&pPresentationDescriptor);
+
+        if (SUCCEEDED(hr) && pPresentationDescriptor) {
+            // Get duration
+            UINT64 duration = 0;
+            if (SUCCEEDED(pPresentationDescriptor->GetUINT64(MF_PD_DURATION, &duration))) {
+                pMetadata->duration = static_cast<LONGLONG>(duration);
+                pMetadata->hasDuration = TRUE;
+            }
+
+            // Get stream descriptors to access more metadata
+            DWORD streamCount = 0;
+            hr = pPresentationDescriptor->GetStreamDescriptorCount(&streamCount);
+
+            if (SUCCEEDED(hr)) {
+                // Try to get title and other metadata from attributes
+                IMFAttributes* pAttributes = nullptr;
+                if (SUCCEEDED(pPresentationDescriptor->QueryInterface(IID_PPV_ARGS(&pAttributes)))) {
+                    // We can't directly access some metadata attributes due to missing definitions
+                    // Set a default title based on the file path if available
+                    if (pInstance->pSourceReader) {
+                        // For now, we'll leave title empty as we can't reliably extract it
+                        // without the proper attribute definitions
+                        pMetadata->hasTitle = FALSE;
+                    }
+
+                    // Try to estimate bitrate from stream properties
+                    UINT64 duration = 0;
+                    if (SUCCEEDED(pPresentationDescriptor->GetUINT64(MF_PD_DURATION, &duration)) && duration > 0) {
+                        // We'll try to estimate bitrate later from individual streams
+                        pMetadata->hasBitrate = FALSE;
+                    }
+
+                    pAttributes->Release();
+                }
+
+                // Process each stream to get more metadata
+                for (DWORD i = 0; i < streamCount; i++) {
+                    BOOL selected = FALSE;
+                    IMFStreamDescriptor* pStreamDescriptor = nullptr;
+
+                    if (SUCCEEDED(pPresentationDescriptor->GetStreamDescriptorByIndex(i, &selected, &pStreamDescriptor))) {
+                        // Get media type handler
+                        IMFMediaTypeHandler* pHandler = nullptr;
+                        if (SUCCEEDED(pStreamDescriptor->GetMediaTypeHandler(&pHandler))) {
+                            // Get major type to determine if video or audio
+                            GUID majorType;
+                            if (SUCCEEDED(pHandler->GetMajorType(&majorType))) {
+                                if (majorType == MFMediaType_Video) {
+                                    // Get current media type
+                                    IMFMediaType* pMediaType = nullptr;
+                                    if (SUCCEEDED(pHandler->GetCurrentMediaType(&pMediaType))) {
+                                        // Get video dimensions
+                                        UINT32 width = 0, height = 0;
+                                        if (SUCCEEDED(MFGetAttributeSize(pMediaType, MF_MT_FRAME_SIZE, &width, &height))) {
+                                            pMetadata->width = width;
+                                            pMetadata->height = height;
+                                            pMetadata->hasWidth = TRUE;
+                                            pMetadata->hasHeight = TRUE;
+                                        }
+
+                                        // Get frame rate
+                                        UINT32 numerator = 0, denominator = 1;
+                                        if (SUCCEEDED(MFGetAttributeRatio(pMediaType, MF_MT_FRAME_RATE, &numerator, &denominator))) {
+                                            if (denominator > 0) {
+                                                pMetadata->frameRate = static_cast<float>(numerator) / static_cast<float>(denominator);
+                                                pMetadata->hasFrameRate = TRUE;
+                                            }
+                                        }
+
+                                        // Get subtype (format) for mime type
+                                        GUID subtype;
+                                        if (SUCCEEDED(pMediaType->GetGUID(MF_MT_SUBTYPE, &subtype))) {
+                                            // Convert subtype to mime type string
+                                            if (subtype == MFVideoFormat_H264) {
+                                                wcscpy_s(pMetadata->mimeType, L"video/h264");
+                                                pMetadata->hasMimeType = TRUE;
+                                            }
+                                            else if (subtype == MFVideoFormat_HEVC) {
+                                                wcscpy_s(pMetadata->mimeType, L"video/hevc");
+                                                pMetadata->hasMimeType = TRUE;
+                                            }
+                                            else if (subtype == MFVideoFormat_MPEG2) {
+                                                wcscpy_s(pMetadata->mimeType, L"video/mpeg2");
+                                                pMetadata->hasMimeType = TRUE;
+                                            }
+                                            else if (subtype == MFVideoFormat_WMV3) {
+                                                wcscpy_s(pMetadata->mimeType, L"video/wmv");
+                                                pMetadata->hasMimeType = TRUE;
+                                            }
+                                            else {
+                                                wcscpy_s(pMetadata->mimeType, L"video/unknown");
+                                                pMetadata->hasMimeType = TRUE;
+                                            }
+                                        }
+
+                                        pMediaType->Release();
+                                    }
+                                }
+                                else if (majorType == MFMediaType_Audio) {
+                                    // Get current media type
+                                    IMFMediaType* pMediaType = nullptr;
+                                    if (SUCCEEDED(pHandler->GetCurrentMediaType(&pMediaType))) {
+                                        // Get audio channels
+                                        UINT32 channels = 0;
+                                        if (SUCCEEDED(pMediaType->GetUINT32(MF_MT_AUDIO_NUM_CHANNELS, &channels))) {
+                                            pMetadata->audioChannels = channels;
+                                            pMetadata->hasAudioChannels = TRUE;
+                                        }
+
+                                        // Get audio sample rate
+                                        UINT32 sampleRate = 0;
+                                        if (SUCCEEDED(pMediaType->GetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, &sampleRate))) {
+                                            pMetadata->audioSampleRate = sampleRate;
+                                            pMetadata->hasAudioSampleRate = TRUE;
+                                        }
+
+                                        pMediaType->Release();
+                                    }
+                                }
+                            }
+                            pHandler->Release();
+                        }
+                        pStreamDescriptor->Release();
+                    }
+                }
+            }
+            pPresentationDescriptor->Release();
+        }
+        pMediaSource->Release();
+    }
+
+    // If we couldn't get some metadata from the media source, try to get it from the instance
+    if (!pMetadata->hasWidth || !pMetadata->hasHeight) {
+        if (pInstance->videoWidth > 0 && pInstance->videoHeight > 0) {
+            pMetadata->width = pInstance->videoWidth;
+            pMetadata->height = pInstance->videoHeight;
+            pMetadata->hasWidth = TRUE;
+            pMetadata->hasHeight = TRUE;
+        }
+    }
+
+    // If we couldn't get frame rate from media source, try to get it directly
+    if (!pMetadata->hasFrameRate) {
+        UINT numerator = 0, denominator = 1;
+        if (SUCCEEDED(GetVideoFrameRate(pInstance, &numerator, &denominator)) && denominator > 0) {
+            pMetadata->frameRate = static_cast<float>(numerator) / static_cast<float>(denominator);
+            pMetadata->hasFrameRate = TRUE;
+        }
+    }
+
+    // If we couldn't get duration from media source, try to get it directly
+    if (!pMetadata->hasDuration) {
+        LONGLONG duration = 0;
+        if (SUCCEEDED(GetMediaDuration(pInstance, &duration))) {
+            pMetadata->duration = duration;
+            pMetadata->hasDuration = TRUE;
+        }
+    }
+
+    // If we couldn't get audio channels, check if audio is available
+    if (!pMetadata->hasAudioChannels && pInstance->bHasAudio) {
+        if (pInstance->pSourceAudioFormat) {
+            pMetadata->audioChannels = pInstance->pSourceAudioFormat->nChannels;
+            pMetadata->hasAudioChannels = TRUE;
+
+            pMetadata->audioSampleRate = pInstance->pSourceAudioFormat->nSamplesPerSec;
+            pMetadata->hasAudioSampleRate = TRUE;
+        }
+    }
+
+    return S_OK;
+}
