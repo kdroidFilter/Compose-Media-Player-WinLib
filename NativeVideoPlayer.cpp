@@ -483,6 +483,20 @@ NATIVEVIDEOPLAYER_API HRESULT SeekMedia(VideoPlayerInstance* pInstance, LONGLONG
         return hr;
     }
 
+    // Also seek the audio source reader if available
+    if (pInstance->pSourceReaderAudio) {
+        PROPVARIANT varAudio;
+        PropVariantInit(&varAudio);
+        varAudio.vt = VT_I8;
+        varAudio.hVal.QuadPart = llPositionIn100Ns;
+
+        HRESULT hrAudio = pInstance->pSourceReaderAudio->SetCurrentPosition(GUID_NULL, varAudio);
+        if (FAILED(hrAudio)) {
+            PrintHR("Failed to seek audio source reader", hrAudio);
+        }
+        PropVariantClear(&varAudio);
+    }
+
 
     // Reset audio client if needed
     if (pInstance->bHasAudio && pInstance->pRenderClient && pInstance->pAudioClient) {
