@@ -149,28 +149,14 @@ DWORD WINAPI AudioThreadProc(LPVOID lpParam) {
         if (llTimeStamp > 0) {
             int64_t diff = 0;
 
-            // Use presentation clock for synchronization if automatic sync is enabled
-            if (pInstance->bUseAutomaticSync && pInstance->pPresentationClock) {
+            // Use presentation clock for synchronization
+            if (pInstance->pPresentationClock) {
                 MFTIME clockTime = 0;
                 if (SUCCEEDED(pInstance->pPresentationClock->GetTime(&clockTime))) {
                     // Calculate difference between sample timestamp and presentation clock
-                    // When using automatic synchronization, the presentation clock's rate 
-                    // already accounts for playback speed, so we don't need to adjust the clock time
+                    // The presentation clock's rate already accounts for playback speed
                     diff = static_cast<int64_t>((llTimeStamp - clockTime) / 10000);
                 }
-            }
-            // Otherwise use system time-based synchronization (original method)
-            else if (pInstance->llPlaybackStartTime > 0) {
-                auto sampleTimeMs = static_cast<ULONGLONG>(llTimeStamp / 10000);
-                ULONGLONG currentTime = GetCurrentTimeMs();
-
-                // Calculate elapsed time adjusted by playback speed
-                auto effectiveElapsed = static_cast<ULONGLONG>(
-                    (currentTime - pInstance->llPlaybackStartTime - pInstance->llTotalPauseTime)
-                    * pInstance->playbackSpeed);
-
-                // Calculate difference between sample time and elapsed time
-                diff = static_cast<int64_t>(sampleTimeMs - effectiveElapsed);
             }
 
             // Handle different synchronization cases
@@ -183,14 +169,6 @@ DWORD WINAPI AudioThreadProc(LPVOID lpParam) {
                 // Audio very late: skip sample
                 pSample->Release();
                 continue;
-            }
-            else if (diff < -15) {
-                // Audio slightly late: adjust clock if not using automatic sync
-                if (!pInstance->bUseAutomaticSync) {
-                    EnterCriticalSection(&pInstance->csClockSync);
-                    pInstance->llMasterClock += static_cast<LONGLONG>((diff * 5000) / pInstance->playbackSpeed);
-                    LeaveCriticalSection(&pInstance->csClockSync);
-                }
             }
             else if (diff > 0) {
                 // Small adjustment for minimal differences
@@ -261,12 +239,6 @@ DWORD WINAPI AudioThreadProc(LPVOID lpParam) {
         pBuf->Unlock();
         pBuf->Release();
         pSample->Release();
-
-        if (llTimeStamp > 0) {
-            EnterCriticalSection(&pInstance->csClockSync);
-            pInstance->llMasterClock = llTimeStamp;
-            LeaveCriticalSection(&pInstance->csClockSync);
-        }
 
         WaitForSingleObject(pInstance->hAudioSamplesReadyEvent, 5);
     }

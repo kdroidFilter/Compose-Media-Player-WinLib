@@ -105,12 +105,9 @@ NATIVEVIDEOPLAYER_API HRESULT OpenMedia(VideoPlayerInstance* pInstance, const wc
     pAttributes->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
     pAttributes->SetUINT32(MF_SOURCE_READER_DISABLE_DXVA, FALSE);
     pAttributes->SetUnknown(MF_SOURCE_READER_D3D_MANAGER, GetDXGIDeviceManager());
-    pAttributes->SetUINT32(MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, TRUE);
 
-    // Enable automatic synchronization if requested
-    if (pInstance->bUseAutomaticSync) {
-        pAttributes->SetUINT32(MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, TRUE);
-    }
+    // Enable advanced video processing for better synchronization
+    pAttributes->SetUINT32(MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, TRUE);
 
     // Create source reader for both audio and video
     hr = MFCreateSourceReaderFromURL(url, pAttributes, &pInstance->pSourceReader);
@@ -230,60 +227,58 @@ NATIVEVIDEOPLAYER_API HRESULT OpenMedia(VideoPlayerInstance* pInstance, const wc
         }
     }
 
-    // 4. Set up presentation clock for automatic synchronization
+    // 4. Set up presentation clock for synchronization
     // ----------------------------------------------------------
-    if (pInstance->bUseAutomaticSync) {
-        // Get the media source from the source reader
-        hr = pInstance->pSourceReader->GetServiceForStream(
-            MF_SOURCE_READER_MEDIASOURCE, 
-            GUID_NULL, 
-            IID_PPV_ARGS(&pInstance->pMediaSource));
+    // Get the media source from the source reader
+    hr = pInstance->pSourceReader->GetServiceForStream(
+        MF_SOURCE_READER_MEDIASOURCE, 
+        GUID_NULL, 
+        IID_PPV_ARGS(&pInstance->pMediaSource));
 
+    if (SUCCEEDED(hr)) {
+        // Create the presentation clock
+        hr = MFCreatePresentationClock(&pInstance->pPresentationClock);
         if (SUCCEEDED(hr)) {
-            // Create the presentation clock
-            hr = MFCreatePresentationClock(&pInstance->pPresentationClock);
+            // Create a system time source
+            IMFPresentationTimeSource* pTimeSource = nullptr;
+            hr = MFCreateSystemTimeSource(&pTimeSource);
             if (SUCCEEDED(hr)) {
-                // Create a system time source
-                IMFPresentationTimeSource* pTimeSource = nullptr;
-                hr = MFCreateSystemTimeSource(&pTimeSource);
+                // Set the time source on the presentation clock
+                hr = pInstance->pPresentationClock->SetTimeSource(pTimeSource);
                 if (SUCCEEDED(hr)) {
-                    // Set the time source on the presentation clock
-                    hr = pInstance->pPresentationClock->SetTimeSource(pTimeSource);
+                    // Set the rate control on the presentation clock
+                    IMFRateControl* pRateControl = nullptr;
+                    hr = pInstance->pPresentationClock->QueryInterface(IID_PPV_ARGS(&pRateControl));
                     if (SUCCEEDED(hr)) {
-                        // Set the rate control on the presentation clock
-                        IMFRateControl* pRateControl = nullptr;
-                        hr = pInstance->pPresentationClock->QueryInterface(IID_PPV_ARGS(&pRateControl));
-                        if (SUCCEEDED(hr)) {
-                            // Explicitly set rate to 1.0 to ensure correct initial playback speed
-                            hr = pRateControl->SetRate(FALSE, 1.0f);
-                            if (FAILED(hr)) {
-                                PrintHR("Failed to set initial presentation clock rate", hr);
-                            }
-                            pRateControl->Release();
+                        // Explicitly set rate to 1.0 to ensure correct initial playback speed
+                        hr = pRateControl->SetRate(FALSE, 1.0f);
+                        if (FAILED(hr)) {
+                            PrintHR("Failed to set initial presentation clock rate", hr);
                         }
-
-                        // Get the media sink from the media source
-                        IMFMediaSink* pMediaSink = nullptr;
-                        hr = pInstance->pMediaSource->QueryInterface(IID_PPV_ARGS(&pMediaSink));
-                        if (SUCCEEDED(hr)) {
-                            // Set the presentation clock on the media sink
-                            IMFClockStateSink* pClockStateSink = nullptr;
-                            hr = pMediaSink->QueryInterface(IID_PPV_ARGS(&pClockStateSink));
-                            if (SUCCEEDED(hr)) {
-                                // Start the presentation clock
-                                hr = pInstance->pPresentationClock->Start(0);
-                                if (FAILED(hr)) {
-                                    PrintHR("Failed to start presentation clock", hr);
-                                }
-                                pClockStateSink->Release();
-                            }
-                            pMediaSink->Release();
-                        } else {
-                            PrintHR("Failed to get media sink from media source", hr);
-                        }
+                        pRateControl->Release();
                     }
-                    safeRelease(pTimeSource);
+
+                    // Get the media sink from the media source
+                    IMFMediaSink* pMediaSink = nullptr;
+                    hr = pInstance->pMediaSource->QueryInterface(IID_PPV_ARGS(&pMediaSink));
+                    if (SUCCEEDED(hr)) {
+                        // Set the presentation clock on the media sink
+                        IMFClockStateSink* pClockStateSink = nullptr;
+                        hr = pMediaSink->QueryInterface(IID_PPV_ARGS(&pClockStateSink));
+                        if (SUCCEEDED(hr)) {
+                            // Start the presentation clock
+                            hr = pInstance->pPresentationClock->Start(0);
+                            if (FAILED(hr)) {
+                                PrintHR("Failed to start presentation clock", hr);
+                            }
+                            pClockStateSink->Release();
+                        }
+                        pMediaSink->Release();
+                    } else {
+                        PrintHR("Failed to get media sink from media source", hr);
+                    }
                 }
+                safeRelease(pTimeSource);
             }
         }
     }
@@ -337,8 +332,8 @@ NATIVEVIDEOPLAYER_API HRESULT ReadVideoFrame(VideoPlayerInstance* pInstance, BYT
     // Store current position
     pInstance->llCurrentPosition = llTimestamp;
 
-    // Check if we're using automatic synchronization
-    if (pInstance->bUseAutomaticSync && pInstance->pPresentationClock) {
+    // Automatic synchronization with presentation clock
+    if (pInstance->pPresentationClock) {
         // With automatic synchronization, the presentation clock handles timing
         // We need to check if we should skip very late frames or wait for early frames
 
@@ -353,8 +348,7 @@ NATIVEVIDEOPLAYER_API HRESULT ReadVideoFrame(VideoPlayerInstance* pInstance, BYT
             double frameTimeMs = 1000.0 * frameRateDenom / frameRateNum;
             auto skipThreshold = static_cast<LONGLONG>(-frameTimeMs * 3 * 10000);
 
-            // When using automatic synchronization, the presentation clock's rate 
-            // already accounts for playback speed, so we don't need to adjust the clock time
+            // The presentation clock's rate already accounts for playback speed
 
             // Calculate difference between frame timestamp and clock
             LONGLONG diff = llTimestamp - clockTime;
@@ -375,57 +369,6 @@ NATIVEVIDEOPLAYER_API HRESULT ReadVideoFrame(VideoPlayerInstance* pInstance, BYT
                 if (waitTime > 1.0) {
                     PreciseSleepHighRes(waitTime);
                 }
-            }
-        }
-    }
-    else {
-        // Manual synchronization (original implementation)
-        LONGLONG masterClock = 0;
-        EnterCriticalSection(&pInstance->csClockSync);
-        masterClock = pInstance->llMasterClock;
-        LeaveCriticalSection(&pInstance->csClockSync);
-
-        UINT frameRateNum = 30, frameRateDenom = 1;
-        GetVideoFrameRate(pInstance, &frameRateNum, &frameRateDenom);
-        double frameTimeMs = 1000.0 * frameRateDenom / frameRateNum;
-        auto skipThreshold = static_cast<LONGLONG>(-frameTimeMs * 3 * 10000);
-
-        // Video synchronization
-        if (pInstance->bHasAudio && masterClock > 0) {
-            // Sync with audio clock
-            auto adjustedMasterClock = static_cast<LONGLONG>(masterClock * pInstance->playbackSpeed);
-            LONGLONG diff = llTimestamp - adjustedMasterClock;
-
-            if (diff > 0) {
-                // Video ahead: wait
-                double maxWaitTime = frameTimeMs * 2 / pInstance->playbackSpeed;
-                double waitTime = std::min<double>(diff / 10000.0, maxWaitTime);
-                if (waitTime > 1.0)
-                    PreciseSleepHighRes(waitTime);
-            } 
-            else if (diff < skipThreshold) {
-                // Video very late: skip frame
-                pSample->Release();
-                *pData = nullptr;
-                *pDataSize = 0;
-                return S_OK;
-            }
-            // If slightly late, play frame normally
-        } 
-        else {
-            // No audio or no clock: sync with system time
-            auto frameTimeAbs = static_cast<ULONGLONG>(llTimestamp / 10000);
-            ULONGLONG currentTime = GetCurrentTimeMs();
-            auto effectiveElapsed = static_cast<ULONGLONG>(
-                (currentTime - pInstance->llPlaybackStartTime - pInstance->llTotalPauseTime) 
-                * pInstance->playbackSpeed);
-
-            if (frameTimeAbs > effectiveElapsed) {
-                // Limit wait time
-                double waitTime = std::min<double>(
-                    (frameTimeAbs - effectiveElapsed) / pInstance->playbackSpeed,
-                    frameTimeMs * 1.5 / pInstance->playbackSpeed);
-                PreciseSleepHighRes(waitTime);
             }
         }
     }
@@ -525,8 +468,8 @@ NATIVEVIDEOPLAYER_API HRESULT SeekMedia(VideoPlayerInstance* pInstance, LONGLONG
         Sleep(5);
     }
 
-    // If using automatic synchronization, stop the presentation clock
-    if (pInstance->bUseAutomaticSync && pInstance->pPresentationClock) {
+    // Stop the presentation clock
+    if (pInstance->pPresentationClock) {
         pInstance->pPresentationClock->Stop();
     }
 
@@ -540,13 +483,6 @@ NATIVEVIDEOPLAYER_API HRESULT SeekMedia(VideoPlayerInstance* pInstance, LONGLONG
         return hr;
     }
 
-    // If using separate audio reader, seek it too
-    if (pInstance->bHasAudio && pInstance->pSourceReaderAudio && !pInstance->bUseAutomaticSync) {
-        hr = pInstance->pSourceReaderAudio->SetCurrentPosition(GUID_NULL, var);
-        if (FAILED(hr)) {
-            PrintHR("Failed to seek audio stream", hr);
-        }
-    }
 
     // Reset audio client if needed
     if (pInstance->bHasAudio && pInstance->pRenderClient && pInstance->pAudioClient) {
@@ -560,19 +496,14 @@ NATIVEVIDEOPLAYER_API HRESULT SeekMedia(VideoPlayerInstance* pInstance, LONGLONG
 
     // Update position and state
     EnterCriticalSection(&pInstance->csClockSync);
-    pInstance->llMasterClock = llPositionIn100Ns;
     pInstance->llCurrentPosition = llPositionIn100Ns;
     pInstance->bSeekInProgress = FALSE;
     LeaveCriticalSection(&pInstance->csClockSync);
 
     pInstance->bEOF = FALSE;
 
-    // Update playback start time for manual synchronization
-    ULONGLONG currentTime = GetCurrentTimeMs();
-    pInstance->llPlaybackStartTime = currentTime - static_cast<ULONGLONG>(llPositionIn100Ns / 10000);
-
-    // If using automatic synchronization, restart the presentation clock at the new position
-    if (pInstance->bUseAutomaticSync && pInstance->pPresentationClock) {
+    // Restart the presentation clock at the new position
+    if (pInstance->pPresentationClock) {
         hr = pInstance->pPresentationClock->Start(llPositionIn100Ns);
         if (FAILED(hr)) {
             PrintHR("Failed to restart presentation clock after seek", hr);
@@ -631,13 +562,8 @@ NATIVEVIDEOPLAYER_API HRESULT SetPlaybackState(VideoPlayerInstance* pInstance, B
             pInstance->llPauseStart = 0;
             pInstance->llPlaybackStartTime = 0;
 
-            // Reset master clock to avoid synchronization issues
-            EnterCriticalSection(&pInstance->csClockSync);
-            pInstance->llMasterClock = 0;
-            LeaveCriticalSection(&pInstance->csClockSync);
-
-            // Stop presentation clock if using automatic synchronization
-            if (pInstance->bUseAutomaticSync && pInstance->pPresentationClock) {
+            // Stop presentation clock
+            if (pInstance->pPresentationClock) {
                 pInstance->pPresentationClock->Stop();
             }
         }
@@ -657,8 +583,8 @@ NATIVEVIDEOPLAYER_API HRESULT SetPlaybackState(VideoPlayerInstance* pInstance, B
             pInstance->pAudioClient->Start();
         }
 
-        // Start or resume presentation clock if using automatic synchronization
-        if (pInstance->bUseAutomaticSync && pInstance->pPresentationClock) {
+        // Start or resume presentation clock
+        if (pInstance->pPresentationClock) {
             MFTIME clockTime = 0;
             if (SUCCEEDED(pInstance->pPresentationClock->GetTime(&clockTime))) {
                 hr = pInstance->pPresentationClock->Start(clockTime);
@@ -678,8 +604,8 @@ NATIVEVIDEOPLAYER_API HRESULT SetPlaybackState(VideoPlayerInstance* pInstance, B
             pInstance->pAudioClient->Stop();
         }
 
-        // Pause presentation clock if using automatic synchronization
-        if (pInstance->bUseAutomaticSync && pInstance->pPresentationClock) {
+        // Pause presentation clock
+        if (pInstance->pPresentationClock) {
             hr = pInstance->pPresentationClock->Pause();
             if (FAILED(hr)) {
                 PrintHR("Failed to pause presentation clock", hr);
@@ -780,8 +706,8 @@ NATIVEVIDEOPLAYER_API HRESULT SetPlaybackSpeed(VideoPlayerInstance* pInstance, f
     // Store speed in instance
     pInstance->playbackSpeed = speed;
 
-    // If using automatic synchronization, update the presentation clock rate
-    if (pInstance->bUseAutomaticSync && pInstance->pPresentationClock) {
+    // Update the presentation clock rate
+    if (pInstance->pPresentationClock) {
         // Get the rate control interface from the presentation clock
         IMFRateControl* pRateControl = nullptr;
         HRESULT hr = pInstance->pPresentationClock->QueryInterface(IID_PPV_ARGS(&pRateControl));
@@ -790,7 +716,6 @@ NATIVEVIDEOPLAYER_API HRESULT SetPlaybackSpeed(VideoPlayerInstance* pInstance, f
             hr = pRateControl->SetRate(FALSE, speed);
             if (FAILED(hr)) {
                 PrintHR("Failed to set presentation clock rate", hr);
-                // Continue anyway, as we'll use the playbackSpeed value for manual adjustments
             }
             pRateControl->Release();
         }
