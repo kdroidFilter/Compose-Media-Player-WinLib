@@ -21,6 +21,10 @@ struct VideoPlayerInstance {
     UINT32 videoWidth = 0;
     UINT32 videoHeight = 0;
     BOOL bEOF = FALSE;
+    
+    // Frame caching for paused state
+    IMFSample* pCachedSample = nullptr;     // Cached sample for paused state
+    BOOL bHasInitialFrame = FALSE;          // Whether we've read an initial frame when paused
 
     // Audio related members
     IMFSourceReader* pSourceReaderAudio = nullptr;

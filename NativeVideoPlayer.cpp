@@ -67,6 +67,13 @@ NATIVEVIDEOPLAYER_API void DestroyVideoPlayerInstance(VideoPlayerInstance* pInst
         // Ensure all media resources are released
         CloseMedia(pInstance);
 
+        // Double-check that cached sample is released
+        // This is already done in CloseMedia, but we do it again as a safety measure
+        if (pInstance->pCachedSample) {
+            pInstance->pCachedSample->Release();
+            pInstance->pCachedSample = nullptr;
+        }
+
         // Delete critical section
         DeleteCriticalSection(&pInstance->csClockSync);
 
@@ -76,7 +83,7 @@ NATIVEVIDEOPLAYER_API void DestroyVideoPlayerInstance(VideoPlayerInstance* pInst
     }
 }
 
-NATIVEVIDEOPLAYER_API HRESULT OpenMedia(VideoPlayerInstance* pInstance, const wchar_t* url) {
+NATIVEVIDEOPLAYER_API HRESULT OpenMedia(VideoPlayerInstance* pInstance, const wchar_t* url, BOOL startPlayback) {
     // Parameter validation
     if (!pInstance || !url)
         return OP_E_INVALID_PARAMETER;
@@ -88,6 +95,13 @@ NATIVEVIDEOPLAYER_API HRESULT OpenMedia(VideoPlayerInstance* pInstance, const wc
     pInstance->bEOF = FALSE;
     pInstance->videoWidth = pInstance->videoHeight = 0;
     pInstance->bHasAudio = FALSE;
+
+    // Initialize frame caching for paused state
+    pInstance->bHasInitialFrame = FALSE;
+    if (pInstance->pCachedSample) {
+        pInstance->pCachedSample->Release();
+        pInstance->pCachedSample = nullptr;
+    }
 
     HRESULT hr = S_OK;
 
@@ -231,8 +245,8 @@ NATIVEVIDEOPLAYER_API HRESULT OpenMedia(VideoPlayerInstance* pInstance, const wc
     // ----------------------------------------------------------
     // Get the media source from the source reader
     hr = pInstance->pSourceReader->GetServiceForStream(
-        MF_SOURCE_READER_MEDIASOURCE, 
-        GUID_NULL, 
+        MF_SOURCE_READER_MEDIASOURCE,
+        GUID_NULL,
         IID_PPV_ARGS(&pInstance->pMediaSource));
 
     if (SUCCEEDED(hr)) {
@@ -266,10 +280,23 @@ NATIVEVIDEOPLAYER_API HRESULT OpenMedia(VideoPlayerInstance* pInstance, const wc
                         IMFClockStateSink* pClockStateSink = nullptr;
                         hr = pMediaSink->QueryInterface(IID_PPV_ARGS(&pClockStateSink));
                         if (SUCCEEDED(hr)) {
-                            // Start the presentation clock
-                            hr = pInstance->pPresentationClock->Start(0);
-                            if (FAILED(hr)) {
-                                PrintHR("Failed to start presentation clock", hr);
+                            // Start the presentation clock only if startPlayback is TRUE
+                            // This allows the player to be initialized in a paused state
+                            // when InitialPlayerState.PAUSE is specified in the Kotlin code
+                            if (startPlayback) {
+                                hr = pInstance->pPresentationClock->Start(0);
+                                if (FAILED(hr)) {
+                                    PrintHR("Failed to start presentation clock", hr);
+                                }
+                            } else {
+                                // If not starting playback, initialize the clock but don't start it
+                                // This keeps the player in a paused state until explicitly started
+                                hr = pInstance->pPresentationClock->Pause();
+                                if (FAILED(hr)) {
+                                    PrintHR("Failed to pause presentation clock", hr);
+                                    // Continue even if pause fails - this is not a critical error
+                                    // The player will still be usable, just not in the ideal initial state
+                                }
                             }
                             pClockStateSink->Release();
                         }
@@ -285,7 +312,10 @@ NATIVEVIDEOPLAYER_API HRESULT OpenMedia(VideoPlayerInstance* pInstance, const wc
 
     // 5. Start audio thread for both manual and automatic synchronization
     // ----------------------------------------------------
-    if (pInstance->bHasAudio && pInstance->bAudioInitialized && pInstance->pSourceReaderAudio) {
+    // Only start audio thread if startPlayback is TRUE and audio is available
+    // This ensures that when InitialPlayerState.PAUSE is specified, no audio is played
+    // until the user explicitly calls play()
+    if (pInstance->bHasAudio && pInstance->bAudioInitialized && pInstance->pSourceReaderAudio && startPlayback) {
         hr = StartAudioThread(pInstance);
         if (FAILED(hr)) {
             PrintHR("StartAudioThread failed", hr);
@@ -308,29 +338,89 @@ NATIVEVIDEOPLAYER_API HRESULT ReadVideoFrame(VideoPlayerInstance* pInstance, BYT
         return S_FALSE;
     }
 
+    // Check if player is paused
+    BOOL isPaused = (pInstance->llPauseStart != 0);
+    IMFSample* pSample = nullptr;
+    HRESULT hr = S_OK;
     DWORD streamIndex = 0, dwFlags = 0;
     LONGLONG llTimestamp = 0;
-    IMFSample* pSample = nullptr;
-    HRESULT hr = pInstance->pSourceReader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &streamIndex, &dwFlags, &llTimestamp, &pSample);
-    if (FAILED(hr))
-        return hr;
 
-    if (dwFlags & MF_SOURCE_READERF_ENDOFSTREAM) {
-        pInstance->bEOF = TRUE;
-        if (pSample) pSample->Release();
-        *pData = nullptr;
-        *pDataSize = 0;
-        return S_FALSE;
+    if (isPaused) {
+        // Player is paused - check if we need to read an initial frame
+        if (!pInstance->bHasInitialFrame) {
+            // Read one frame when paused and cache it
+            hr = pInstance->pSourceReader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &streamIndex, &dwFlags, &llTimestamp, &pSample);
+            if (FAILED(hr))
+                return hr;
+
+            if (dwFlags & MF_SOURCE_READERF_ENDOFSTREAM) {
+                pInstance->bEOF = TRUE;
+                if (pSample) pSample->Release();
+                *pData = nullptr;
+                *pDataSize = 0;
+                return S_FALSE;
+            }
+
+            if (!pSample) { 
+                *pData = nullptr; 
+                *pDataSize = 0; 
+                return S_OK; 
+            }
+
+            // Store the frame for future use
+            if (pInstance->pCachedSample) {
+                pInstance->pCachedSample->Release();
+                pInstance->pCachedSample = nullptr;
+            }
+            pSample->AddRef(); // Add reference for the cached sample
+            pInstance->pCachedSample = pSample;
+            pInstance->bHasInitialFrame = TRUE;
+            
+            // Don't update position when paused - keep the current position
+        } else {
+            // Already have an initial frame, use the cached sample
+            if (pInstance->pCachedSample) {
+                pSample = pInstance->pCachedSample;
+                pSample->AddRef(); // Add reference for this function's use
+                // Don't update position when paused
+            } else {
+                // No cached sample available (shouldn't happen)
+                *pData = nullptr;
+                *pDataSize = 0;
+                return S_OK;
+            }
+        }
+    } else {
+        // Player is playing - read a new frame
+        hr = pInstance->pSourceReader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &streamIndex, &dwFlags, &llTimestamp, &pSample);
+        if (FAILED(hr))
+            return hr;
+
+        if (dwFlags & MF_SOURCE_READERF_ENDOFSTREAM) {
+            pInstance->bEOF = TRUE;
+            if (pSample) pSample->Release();
+            *pData = nullptr;
+            *pDataSize = 0;
+            return S_FALSE;
+        }
+
+        if (!pSample) { 
+            *pData = nullptr; 
+            *pDataSize = 0; 
+            return S_OK; 
+        }
+
+        // Update cached sample for future paused state
+        if (pInstance->pCachedSample) {
+            pInstance->pCachedSample->Release();
+            pInstance->pCachedSample = nullptr;
+        }
+        pSample->AddRef(); // Add reference for the cached sample
+        pInstance->pCachedSample = pSample;
+        
+        // Store current position when playing
+        pInstance->llCurrentPosition = llTimestamp;
     }
-
-    if (!pSample) { 
-        *pData = nullptr; 
-        *pDataSize = 0; 
-        return S_OK; 
-    }
-
-    // Store current position
-    pInstance->llCurrentPosition = llTimestamp;
 
     // Automatic synchronization with presentation clock
     if (pInstance->pPresentationClock) {
@@ -455,6 +545,15 @@ NATIVEVIDEOPLAYER_API HRESULT SeekMedia(VideoPlayerInstance* pInstance, LONGLONG
 
     if (pInstance->pLockedBuffer)
         UnlockVideoFrame(pInstance);
+        
+    // Release cached sample when seeking
+    if (pInstance->pCachedSample) {
+        pInstance->pCachedSample->Release();
+        pInstance->pCachedSample = nullptr;
+    }
+    
+    // Reset initial frame flag to ensure we read a new frame at the new position
+    pInstance->bHasInitialFrame = FALSE;
 
     PROPVARIANT var;
     PropVariantInit(&var);
@@ -580,6 +679,20 @@ NATIVEVIDEOPLAYER_API HRESULT SetPlaybackState(VideoPlayerInstance* pInstance, B
             if (pInstance->pPresentationClock) {
                 pInstance->pPresentationClock->Stop();
             }
+
+            // Stop audio thread if running
+            if (pInstance->bAudioThreadRunning) {
+                StopAudioThread(pInstance);
+            }
+
+            // Reset initial frame flag when stopping
+            pInstance->bHasInitialFrame = FALSE;
+
+            // Release cached sample when stopping
+            if (pInstance->pCachedSample) {
+                pInstance->pCachedSample->Release();
+                pInstance->pCachedSample = nullptr;
+            }
         }
     } else if (bPlaying) {
         // Start or resume playback
@@ -592,26 +705,50 @@ NATIVEVIDEOPLAYER_API HRESULT SetPlaybackState(VideoPlayerInstance* pInstance, B
             pInstance->llPauseStart = 0;
         }
 
+        // Reset initial frame flag when switching to playing state
+        pInstance->bHasInitialFrame = FALSE;
+
         // Start audio client if available
         if (pInstance->pAudioClient && pInstance->bAudioInitialized) {
-            pInstance->pAudioClient->Start();
+            hr = pInstance->pAudioClient->Start();
+            if (FAILED(hr)) {
+                PrintHR("Failed to start audio client", hr);
+            }
+        }
+
+        // IMPORTANT: Démarrer le thread audio s'il n'est pas déjà en cours d'exécution
+        // Ceci est crucial pour le cas où on démarre en pause puis on fait play()
+        if (pInstance->bHasAudio && pInstance->bAudioInitialized && pInstance->pSourceReaderAudio) {
+            if (!pInstance->bAudioThreadRunning || pInstance->hAudioThread == nullptr) {
+                hr = StartAudioThread(pInstance);
+                if (FAILED(hr)) {
+                    PrintHR("Failed to start audio thread on play", hr);
+                    // Continue anyway - video can still play without audio
+                }
+            }
         }
 
         // Start or resume presentation clock
         if (pInstance->pPresentationClock) {
-            MFTIME clockTime = 0;
-            if (SUCCEEDED(pInstance->pPresentationClock->GetTime(&clockTime))) {
-                hr = pInstance->pPresentationClock->Start(clockTime);
-                if (FAILED(hr)) {
-                    PrintHR("Failed to start presentation clock", hr);
-                }
+            // IMPORTANT: Démarrer depuis la position actuelle stockée
+            hr = pInstance->pPresentationClock->Start(pInstance->llCurrentPosition);
+            if (FAILED(hr)) {
+                PrintHR("Failed to start presentation clock", hr);
             }
+        }
+
+        // Signal audio thread to continue if it was waiting
+        if (pInstance->hAudioReadyEvent) {
+            SetEvent(pInstance->hAudioReadyEvent);
         }
     } else {
         // Pause playback
         if (pInstance->llPauseStart == 0) {
             pInstance->llPauseStart = GetCurrentTimeMs();
         }
+
+        // Reset initial frame flag when switching to paused state
+        pInstance->bHasInitialFrame = FALSE;
 
         // Pause audio client if available
         if (pInstance->pAudioClient && pInstance->bAudioInitialized) {
@@ -625,6 +762,9 @@ NATIVEVIDEOPLAYER_API HRESULT SetPlaybackState(VideoPlayerInstance* pInstance, B
                 PrintHR("Failed to pause presentation clock", hr);
             }
         }
+
+        // Note: On ne stoppe PAS le thread audio en pause, on le laisse tourner
+        // Il va simplement attendre sur les événements de synchronisation
     }
     return hr;
 }
@@ -644,6 +784,15 @@ NATIVEVIDEOPLAYER_API void CloseMedia(VideoPlayerInstance* pInstance) {
     if (pInstance->pLockedBuffer) {
         UnlockVideoFrame(pInstance);
     }
+    
+    // Release cached sample
+    if (pInstance->pCachedSample) {
+        pInstance->pCachedSample->Release();
+        pInstance->pCachedSample = nullptr;
+    }
+    
+    // Reset initial frame flag
+    pInstance->bHasInitialFrame = FALSE;
 
     // Macro for safely releasing COM interfaces
     #define SAFE_RELEASE(obj) if (obj) { obj->Release(); obj = nullptr; }

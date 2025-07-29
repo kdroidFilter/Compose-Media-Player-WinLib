@@ -82,9 +82,10 @@ NATIVEVIDEOPLAYER_API void DestroyVideoPlayerInstance(VideoPlayerInstance* pInst
  * @brief Ouvre un média (fichier ou URL) et prépare le décodage avec accélération matérielle pour une instance spécifique.
  * @param pInstance Handle de l'instance.
  * @param url Chemin ou URL du média (chaîne large).
+ * @param startPlayback TRUE pour démarrer la lecture immédiatement, FALSE pour rester en pause.
  * @return S_OK en cas de succès, ou un code d'erreur.
  */
-NATIVEVIDEOPLAYER_API HRESULT OpenMedia(VideoPlayerInstance* pInstance, const wchar_t* url);
+NATIVEVIDEOPLAYER_API HRESULT OpenMedia(VideoPlayerInstance* pInstance, const wchar_t* url, BOOL startPlayback = TRUE);
 
 /**
  * @brief Lit la prochaine frame vidéo en format RGB32 pour une instance spécifique.
