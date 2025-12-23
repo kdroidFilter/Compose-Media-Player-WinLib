@@ -36,5 +36,5 @@ if %ERRORLEVEL% neq 0 (
 echo.
 echo === Compilation completed successfully for both architectures ===
 echo.
-echo x64 DLL: ..\mediaplayer\src\jvmMain\resources\win32-x86-64\NativeVideoPlayer.dll
+echo x64 DLL: ..\mediaplayer\src\jvmMain\resources\windows-x86_64\NativeVideoPlayer.dll
 echo ARM64 DLL: ..\mediaplayer\src\jvmMain\resources\win32-arm64\NativeVideoPlayer.dll

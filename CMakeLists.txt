@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD 17)
 # Check target architecture
 if(CMAKE_GENERATOR_PLATFORM STREQUAL "x64" OR CMAKE_GENERATOR_PLATFORM STREQUAL "")
     set(TARGET_ARCH "x64")
-    set(OUTPUT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../mediaplayer/src/jvmMain/resources/win32-x86-64")
+    set(OUTPUT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../mediaplayer/src/jvmMain/resources/windows-x86_64")
     add_compile_options("/arch:AVX2")
 elseif(CMAKE_GENERATOR_PLATFORM STREQUAL "ARM64")
     set(TARGET_ARCH "ARM64")
