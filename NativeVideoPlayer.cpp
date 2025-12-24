@@ -6,6 +6,11 @@
 #include "AudioManager.h"
 #include <algorithm>
 #include <cstring>
+#include <mfapi.h>
+#include <mferror.h>
+
+// For IMF2DBuffer and IMF2DBuffer2 interfaces
+#include <evr.h>
 
 using namespace VideoPlayerUtils;
 using namespace MediaFoundation;
@@ -525,35 +530,212 @@ NATIVEVIDEOPLAYER_API HRESULT ReadVideoFrameInto(
         return OP_E_INVALID_PARAMETER;
     }
 
-    BYTE* srcBytes = nullptr;
-    DWORD srcSize = 0;
-    HRESULT hr = ReadVideoFrame(pInstance, &srcBytes, &srcSize);
-    if (pTimestamp) {
-        *pTimestamp = pInstance->llCurrentPosition;
+    if (!pInstance->pSourceReader)
+        return OP_E_NOT_INITIALIZED;
+
+    if (pInstance->pLockedBuffer)
+        UnlockVideoFrame(pInstance);
+
+    if (pInstance->bEOF) {
+        if (pTimestamp) *pTimestamp = pInstance->llCurrentPosition;
+        return S_FALSE;
     }
 
-    if (hr != S_OK || !srcBytes || srcSize == 0) {
-        UnlockVideoFrame(pInstance);
-        return (hr == S_OK) ? S_FALSE : hr;
+    // Check if player is paused
+    BOOL isPaused = (pInstance->llPauseStart != 0);
+    IMFSample* pSample = nullptr;
+    HRESULT hr = S_OK;
+    DWORD streamIndex = 0, dwFlags = 0;
+    LONGLONG llTimestamp = 0;
+
+    if (isPaused) {
+        if (!pInstance->bHasInitialFrame) {
+            hr = pInstance->pSourceReader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &streamIndex, &dwFlags, &llTimestamp, &pSample);
+            if (FAILED(hr)) return hr;
+
+            if (dwFlags & MF_SOURCE_READERF_ENDOFSTREAM) {
+                pInstance->bEOF = TRUE;
+                if (pSample) pSample->Release();
+                if (pTimestamp) *pTimestamp = pInstance->llCurrentPosition;
+                return S_FALSE;
+            }
+
+            if (!pSample) {
+                if (pTimestamp) *pTimestamp = pInstance->llCurrentPosition;
+                return S_OK;
+            }
+
+            if (pInstance->pCachedSample) {
+                pInstance->pCachedSample->Release();
+                pInstance->pCachedSample = nullptr;
+            }
+            pSample->AddRef();
+            pInstance->pCachedSample = pSample;
+            pInstance->bHasInitialFrame = TRUE;
+        } else {
+            if (pInstance->pCachedSample) {
+                pSample = pInstance->pCachedSample;
+                pSample->AddRef();
+            } else {
+                if (pTimestamp) *pTimestamp = pInstance->llCurrentPosition;
+                return S_OK;
+            }
+        }
+    } else {
+        hr = pInstance->pSourceReader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &streamIndex, &dwFlags, &llTimestamp, &pSample);
+        if (FAILED(hr)) return hr;
+
+        if (dwFlags & MF_SOURCE_READERF_ENDOFSTREAM) {
+            pInstance->bEOF = TRUE;
+            if (pSample) pSample->Release();
+            if (pTimestamp) *pTimestamp = pInstance->llCurrentPosition;
+            return S_FALSE;
+        }
+
+        if (!pSample) {
+            if (pTimestamp) *pTimestamp = pInstance->llCurrentPosition;
+            return S_OK;
+        }
+
+        if (pInstance->pCachedSample) {
+            pInstance->pCachedSample->Release();
+            pInstance->pCachedSample = nullptr;
+        }
+        pSample->AddRef();
+        pInstance->pCachedSample = pSample;
+        pInstance->llCurrentPosition = llTimestamp;
+    }
+
+    // Frame timing synchronization
+    if (pInstance->bUseClockSync && pInstance->llPlaybackStartTime != 0 && llTimestamp > 0) {
+        LONGLONG currentTimeMs = GetCurrentTimeMs();
+        LONGLONG elapsedMs = currentTimeMs - pInstance->llPlaybackStartTime - pInstance->llTotalPauseTime;
+        double adjustedElapsedMs = elapsedMs * pInstance->playbackSpeed;
+        double frameTimeMs_ts = llTimestamp / 10000.0;
+
+        UINT frameRateNum = 60, frameRateDenom = 1;
+        GetVideoFrameRate(pInstance, &frameRateNum, &frameRateDenom);
+        double frameIntervalMs = 1000.0 * frameRateDenom / frameRateNum;
+
+        double diffMs = frameTimeMs_ts - adjustedElapsedMs;
+
+        if (diffMs < -frameIntervalMs * 3) {
+            pSample->Release();
+            if (pTimestamp) *pTimestamp = pInstance->llCurrentPosition;
+            return S_OK;
+        }
+        else if (diffMs > 1.0) {
+            double waitTime = std::min(diffMs, frameIntervalMs * 2);
+            PreciseSleepHighRes(waitTime);
+        }
+    }
+
+    if (pTimestamp) {
+        *pTimestamp = pInstance->llCurrentPosition;
     }
 
     const UINT32 width = pInstance->videoWidth;
     const UINT32 height = pInstance->videoHeight;
     if (width == 0 || height == 0) {
-        UnlockVideoFrame(pInstance);
+        pSample->Release();
         return S_FALSE;
     }
 
-    const DWORD srcRowBytes = width * 4;
     const DWORD requiredDst = dstRowBytes * height;
-    const DWORD requiredSrc = srcRowBytes * height;
-    if (dstCapacity < requiredDst || srcSize < requiredSrc) {
-        UnlockVideoFrame(pInstance);
+    if (dstCapacity < requiredDst) {
+        pSample->Release();
         return OP_E_INVALID_PARAMETER;
     }
 
-    MFCopyImage(pDst, dstRowBytes, srcBytes, srcRowBytes, srcRowBytes, height);
-    UnlockVideoFrame(pInstance);
+    // Try to use IMF2DBuffer2 for optimized zero-copy access
+    IMFMediaBuffer* pBuffer = nullptr;
+    hr = pSample->ConvertToContiguousBuffer(&pBuffer);
+    if (FAILED(hr)) {
+        pSample->Release();
+        return hr;
+    }
+
+    // Attempt IMF2DBuffer2 for direct 2D access (most efficient)
+    IMF2DBuffer2* p2DBuffer2 = nullptr;
+    IMF2DBuffer* p2DBuffer = nullptr;
+    BYTE* pScanline0 = nullptr;
+    LONG srcPitch = 0;
+    BYTE* pBufferStart = nullptr;
+    DWORD cbBufferLength = 0;
+    bool usedDirect2D = false;
+
+    hr = pBuffer->QueryInterface(IID_PPV_ARGS(&p2DBuffer2));
+    if (SUCCEEDED(hr) && p2DBuffer2) {
+        // Use Lock2DSize for optimal access - avoids internal copies
+        hr = p2DBuffer2->Lock2DSize(MF2DBuffer_LockFlags_Read, &pScanline0, &srcPitch, &pBufferStart, &cbBufferLength);
+        if (SUCCEEDED(hr)) {
+            usedDirect2D = true;
+            const DWORD srcRowBytes = width * 4;
+
+            // Zero-copy path: if strides match exactly, use memcpy for the entire buffer
+            if (static_cast<LONG>(dstRowBytes) == srcPitch && static_cast<LONG>(srcRowBytes) == srcPitch) {
+                memcpy(pDst, pScanline0, srcRowBytes * height);
+            } else {
+                // Strides differ - must copy row by row but still more efficient than MFCopyImage
+                BYTE* pSrc = pScanline0;
+                BYTE* pDstRow = pDst;
+                const DWORD copyBytes = std::min(srcRowBytes, dstRowBytes);
+                for (UINT32 y = 0; y < height; y++) {
+                    memcpy(pDstRow, pSrc, copyBytes);
+                    pSrc += srcPitch;
+                    pDstRow += dstRowBytes;
+                }
+            }
+            p2DBuffer2->Unlock2D();
+        }
+        p2DBuffer2->Release();
+    }
+
+    // Fallback to IMF2DBuffer if IMF2DBuffer2 failed
+    if (!usedDirect2D) {
+        hr = pBuffer->QueryInterface(IID_PPV_ARGS(&p2DBuffer));
+        if (SUCCEEDED(hr) && p2DBuffer) {
+            hr = p2DBuffer->Lock2D(&pScanline0, &srcPitch);
+            if (SUCCEEDED(hr)) {
+                usedDirect2D = true;
+                const DWORD srcRowBytes = width * 4;
+
+                if (static_cast<LONG>(dstRowBytes) == srcPitch && static_cast<LONG>(srcRowBytes) == srcPitch) {
+                    memcpy(pDst, pScanline0, srcRowBytes * height);
+                } else {
+                    BYTE* pSrc = pScanline0;
+                    BYTE* pDstRow = pDst;
+                    const DWORD copyBytes = std::min(srcRowBytes, dstRowBytes);
+                    for (UINT32 y = 0; y < height; y++) {
+                        memcpy(pDstRow, pSrc, copyBytes);
+                        pSrc += srcPitch;
+                        pDstRow += dstRowBytes;
+                    }
+                }
+                p2DBuffer->Unlock2D();
+            }
+            p2DBuffer->Release();
+        }
+    }
+
+    // Ultimate fallback to standard buffer lock
+    if (!usedDirect2D) {
+        BYTE* pBytes = nullptr;
+        DWORD cbMax = 0, cbCurr = 0;
+        hr = pBuffer->Lock(&pBytes, &cbMax, &cbCurr);
+        if (SUCCEEDED(hr)) {
+            const DWORD srcRowBytes = width * 4;
+            const DWORD requiredSrc = srcRowBytes * height;
+            if (cbCurr >= requiredSrc) {
+                // Use MFCopyImage as last resort
+                MFCopyImage(pDst, dstRowBytes, pBytes, srcRowBytes, srcRowBytes, height);
+            }
+            pBuffer->Unlock();
+        }
+    }
+
+    pBuffer->Release();
+    pSample->Release();
     return S_OK;
 }
 

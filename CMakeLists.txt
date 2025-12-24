@@ -53,6 +53,7 @@ target_link_libraries(NativeVideoPlayer PRIVATE
         dxva2
         d3d11
         dxgi
+        evr  # For IMF2DBuffer and IMF2DBuffer2 interfaces
 )
 
 # Configure output directory
