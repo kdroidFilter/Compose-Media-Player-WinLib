@@ -103,6 +103,17 @@ NATIVEVIDEOPLAYER_API HRESULT ReadVideoFrame(VideoPlayerInstance* pInstance, BYT
  */
 NATIVEVIDEOPLAYER_API HRESULT UnlockVideoFrame(VideoPlayerInstance* pInstance);
 
+/*
+ * Reads the next video frame and copies it into a destination buffer.
+ * pTimestamp receives the 100ns timestamp when available.
+ */
+NATIVEVIDEOPLAYER_API HRESULT ReadVideoFrameInto(
+    VideoPlayerInstance* pInstance,
+    BYTE* pDst,
+    DWORD dstRowBytes,
+    DWORD dstCapacity,
+    LONGLONG* pTimestamp);
+
 /**
  * @brief Ferme le média et libère les ressources associées pour une instance spécifique.
  * @param pInstance Handle de l'instance.

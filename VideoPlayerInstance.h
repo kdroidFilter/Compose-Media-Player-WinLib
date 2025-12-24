@@ -43,6 +43,7 @@ struct VideoPlayerInstance {
     // Media Foundation clock for synchronization
     IMFPresentationClock* pPresentationClock = nullptr;
     IMFMediaSource* pMediaSource = nullptr;
+    BOOL bUseClockSync = FALSE;
 
     // Timing and synchronization
     LONGLONG llCurrentPosition = 0;

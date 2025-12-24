@@ -119,8 +119,6 @@ DWORD WINAPI AudioThreadProc(LPVOID lpParam)
         WaitForSingleObject(inst->hAudioReadyEvent, INFINITE);
 
     const UINT32 blockAlign = inst->pSourceAudioFormat ? inst->pSourceAudioFormat->nBlockAlign : 4;
-    const double invPlaybackSpeed =
-        1.0 / std::max(0.0001, static_cast<double>(inst->playbackSpeed));
 
     // Main render loop – wait for "ready" event, then push as many frames as possible
     while (inst->bAudioThreadRunning) {
@@ -158,17 +156,27 @@ DWORD WINAPI AudioThreadProc(LPVOID lpParam)
             break;
         }
 
-        // Measure drift between sample PTS and presentation clock
+        // Measure drift between sample PTS and wall clock (real elapsed time)
+        // This ensures audio and video are synchronized to the same time reference
         double driftMs = 0.0;
-        if (inst->pPresentationClock && ts100n > 0) {
-            MFTIME clockTime = 0;
-            if (SUCCEEDED(inst->pPresentationClock->GetTime(&clockTime)))
-                driftMs = static_cast<double>(ts100n - clockTime) / 10'000.0;
+        if (inst->bUseClockSync && inst->llPlaybackStartTime != 0 && ts100n > 0) {
+            // Calculate elapsed time since playback started (in milliseconds)
+            LONGLONG currentTimeMs = GetCurrentTimeMs();
+            LONGLONG elapsedMs = currentTimeMs - inst->llPlaybackStartTime - inst->llTotalPauseTime;
+
+            // Apply playback speed to elapsed time
+            double adjustedElapsedMs = elapsedMs * inst->playbackSpeed;
+
+            // Convert sample timestamp from 100ns units to milliseconds
+            double sampleTimeMs = ts100n / 10000.0;
+
+            // Calculate drift: positive means audio is ahead, negative means audio is late
+            driftMs = sampleTimeMs - adjustedElapsedMs;
         }
 
         if (driftMs > kDriftPositiveThresholdMs) {
-            // Audio ahead → delay feed to renderer (scaled by playback rate)
-            PreciseSleepHighRes(std::min(driftMs, 100.0) * invPlaybackSpeed);
+            // Audio ahead → delay feed to renderer
+            PreciseSleepHighRes(std::min(driftMs, 100.0));
         } else if (driftMs < kDriftNegativeThresholdMs) {
             // Audio too late → drop sample completely (skip)
             sample->Release();
